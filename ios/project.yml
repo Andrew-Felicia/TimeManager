@@ -1,0 +1,17 @@
+name: Flowtime
+options:
+  bundleIdPrefix: app.flowtime
+  deploymentTarget:
+    iOS: "17.0"
+targets:
+  Flowtime:
+    type: application
+    platform: iOS
+    sources: [Flowtime]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.flowtime.ios
+        SWIFT_VERSION: 5.10
+        INFOPLIST_FILE: Flowtime/Info.plist
+    scheme:
+      testTargets: []
