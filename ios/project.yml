@@ -13,5 +13,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: app.flowtime.ios
         SWIFT_VERSION: 5.10
         INFOPLIST_FILE: Flowtime/Info.plist
+        MARKETING_VERSION: 1.0
+        CURRENT_PROJECT_VERSION: 1
     scheme:
       testTargets: []

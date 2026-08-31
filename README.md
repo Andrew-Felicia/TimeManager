@@ -24,7 +24,7 @@ Create a production bundle with `npm run build`. The local Cloudflare runtime su
 
 ## iOS development
 
-The `ios/project.yml` file is an XcodeGen project definition. Install XcodeGen, run `xcodegen generate` inside `ios/`, then open `Flowtime.xcodeproj`. Before a real release, point `FlowtimeAPI.baseURL` at the deployed backend and add Sign in with Apple to exchange an Apple identity token for your API session.
+Open `ios/Flowtime.xcodeproj` directly in Xcode; the generated project is included in the repository. The `ios/project.yml` definition remains available if the project ever needs to be regenerated. Before a real release, point `FlowtimeAPI.baseURL` at the deployed backend and add Sign in with Apple to exchange an Apple identity token for your API session.
 
 ## Production roadmap
 
