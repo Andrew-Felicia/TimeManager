@@ -1,5 +1,7 @@
 import SwiftUI
 import Charts
+import UIKit
+import UserNotifications
 
 struct ContentView: View {
     @State private var selectedTab = 0
@@ -19,6 +21,10 @@ struct ContentView: View {
                 .tabItem { Label("Insights", systemImage: "chart.bar") }
                 .tag(3)
         }
+        .toolbarBackground(.black, for: .tabBar)
+        .toolbarBackground(.visible, for: .tabBar)
+        .background(Color.black.ignoresSafeArea())
+        .preferredColorScheme(.dark)
     }
 }
 
@@ -688,15 +694,6 @@ private struct FocusSummaryCard: View {
 
     var body: some View {
         VStack(spacing: 15) {
-            Picker("Focus mode", selection: Binding(
-                get: { store.focusMode },
-                set: { store.setFocusMode($0) }
-            )) {
-                ForEach(FocusMode.allCases) { mode in Text(mode.rawValue).tag(mode) }
-            }
-            .pickerStyle(.segmented)
-            .colorScheme(.dark)
-
             Text(store.isFocusing ? "FOCUSING NOW" : "FOCUS SESSION")
                 .font(.caption2.bold())
                 .foregroundStyle(.white.opacity(0.6))
@@ -737,8 +734,6 @@ private struct FocusSummaryCard: View {
                         .foregroundStyle(.black)
                         .clipShape(Circle())
                 }
-                .disabled(store.selectedFocusTaskId == nil)
-                .opacity(store.selectedFocusTaskId == nil ? 0.45 : 1)
                 .accessibilityLabel(store.isFocusing ? "Pause focus session" : "Start focus session")
 
                 Button { store.finishFocus() } label: {
@@ -1167,93 +1162,71 @@ private struct TaskListManagerSheet: View {
 
 private struct FocusView: View {
     @EnvironmentObject private var store: FlowtimeStore
-    @State private var showingCustomTime = false
-    private let presets = [25, 50, 90]
 
     var body: some View {
         NavigationStack {
-            ScrollView {
-                VStack(spacing: 18) {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("I’m focusing on")
-                            .font(.caption.bold())
-                            .foregroundStyle(.secondary)
-                        HStack(spacing: 10) {
-                            Image(systemName: "checkmark.circle")
-                                .foregroundStyle(Color.accentColor)
-                            Picker("Focus task", selection: Binding(
-                                get: { store.selectedFocusTaskId },
-                                set: { store.selectFocusTask($0) }
-                            )) {
-                                Text("Choose a task").tag(String?.none)
-                                ForEach(activeTasks) { task in
-                                    Text("\(task.title) · \(task.estimate) min").tag(Optional(task.id))
-                                }
-                            }
-                            .pickerStyle(.menu)
-                            .frame(maxWidth: .infinity, alignment: .leading)
+            ZStack {
+                Color.black.ignoresSafeArea()
+                ScrollView {
+                    VStack(spacing: 22) {
+                        Picker("Focus mode", selection: Binding(
+                            get: { store.focusMode },
+                            set: { store.setFocusMode($0) }
+                        )) {
+                            ForEach(FocusMode.allCases) { mode in Text(mode.rawValue).tag(mode) }
                         }
-                        .padding(.horizontal, 12)
-                        .frame(height: 48)
-                        .background(.background)
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
-                        .disabled(store.isFocusing || activeTasks.isEmpty)
-
-                        if activeTasks.isEmpty {
-                            Text("Add an active task in Tasks before starting a focus session.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    .padding(.horizontal)
-
-                    if store.focusMode == .timer {
-                        LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
-                            ForEach(presets, id: \.self) { minutes in
-                                Button("\(minutes) min") { store.setTimerPreset(minutes: minutes) }
-                                    .buttonStyle(.bordered)
-                                    .tint(store.timerTargetSeconds == minutes * 60 ? .accentColor : .secondary)
-                                    .disabled(store.isFocusing)
-                            }
-                            Button {
-                                showingCustomTime = true
-                            } label: {
-                                Label(customButtonTitle, systemImage: "slider.horizontal.3")
-                            }
-                            .buttonStyle(.bordered)
-                            .tint(isCustomDuration ? .accentColor : .secondary)
-                            .disabled(store.isFocusing)
-                        }
+                        .pickerStyle(.segmented)
                         .padding(.horizontal)
-                    }
 
-                    FocusSummaryCard()
+                        if store.focusMode == .timer {
+                            ClockTimerView()
+                        } else {
+                            stopwatchTaskPicker
+                            FocusSummaryCard()
 
-                    HStack(spacing: 12) {
-                        StatTile(value: formattedDuration(store.weeklyFocusSeconds), label: "This week")
-                        StatTile(value: "\(store.sessionCount)", label: "Sessions")
+                            HStack(spacing: 12) {
+                                StatTile(value: formattedDuration(store.weeklyFocusSeconds), label: "This week")
+                                StatTile(value: "\(store.sessionCount)", label: "Sessions")
+                            }
+                            .padding(.horizontal)
+                        }
                     }
+                    .padding(.vertical)
                 }
-                .padding()
             }
-            .background(Color(.systemGroupedBackground))
-            .navigationTitle("Focus")
-            .sheet(isPresented: $showingCustomTime) {
-                CustomTimerSheet(initialMinutes: max(1, store.timerTargetSeconds / 60))
-            }
+            .navigationTitle(store.focusMode == .timer ? "Timers" : "Stopwatch")
+            .toolbarBackground(.black, for: .navigationBar)
+            .toolbarColorScheme(.dark, for: .navigationBar)
         }
+        .environment(\.colorScheme, .dark)
     }
 
     private var activeTasks: [FlowTask] {
         store.tasks.filter { !$0.done }.sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
     }
 
-    private var isCustomDuration: Bool {
-        !presets.contains(store.timerTargetSeconds / 60)
-    }
-
-    private var customButtonTitle: String {
-        isCustomDuration ? "\(store.timerTargetSeconds / 60) min" : "Custom"
+    private var stopwatchTaskPicker: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "checkmark.circle")
+                .foregroundStyle(Color.accentColor)
+            Picker("Focus task", selection: Binding(
+                get: { store.selectedFocusTaskId },
+                set: { store.selectFocusTask($0) }
+            )) {
+                Text("No task (general focus)").tag(String?.none)
+                ForEach(activeTasks) { task in
+                    Text("\(task.title) · \(task.estimate) min").tag(Optional(task.id))
+                }
+            }
+            .pickerStyle(.menu)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.horizontal, 12)
+        .frame(height: 48)
+        .background(Color(white: 0.11))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .padding(.horizontal)
+        .disabled(store.isAnyFocusRunning || activeTasks.isEmpty)
     }
 
     private func formattedDuration(_ seconds: Int) -> String {
@@ -1261,58 +1234,341 @@ private struct FocusView: View {
     }
 }
 
-private struct CustomTimerSheet: View {
+private struct ClockTimerView: View {
     @EnvironmentObject private var store: FlowtimeStore
-    @Environment(\.dismiss) private var dismiss
-    @State private var minutes: Int
-
-    init(initialMinutes: Int) {
-        _minutes = State(initialValue: initialMinutes)
-    }
+    @State private var hours = 0
+    @State private var minutes = 0
+    @State private var seconds = 0
+    @State private var pickerIsReady = false
+    @State private var showingTimerEndOptions = false
+    private let recentDurations = [1_500, 3_000, 5_400]
 
     var body: some View {
-        NavigationStack {
-            VStack(spacing: 28) {
-                VStack(spacing: 8) {
-                    Text("\(minutes)")
-                        .font(.system(size: 64, weight: .semibold, design: .rounded))
-                        .monospacedDigit()
-                    Text("minutes")
-                        .foregroundStyle(.secondary)
+        VStack(spacing: 28) {
+            if timerIsActive {
+                activeTimerDisplay
+            } else {
+                HStack(spacing: 0) {
+                    timerWheel(title: "hours", selection: $hours, values: 0...23)
+                    timerWheel(title: "min", selection: $minutes, values: 0...59)
+                    timerWheel(title: "sec", selection: $seconds, values: 0...59)
                 }
+                .frame(height: 215)
+                .sensoryFeedback(.selection, trigger: hours)
+                .sensoryFeedback(.selection, trigger: minutes)
+                .sensoryFeedback(.selection, trigger: seconds)
+                .onChange(of: hours) { _, _ in updateDurationFromPicker() }
+                .onChange(of: minutes) { _, _ in updateDurationFromPicker() }
+                .onChange(of: seconds) { _, _ in updateDurationFromPicker() }
+            }
 
-                Slider(
-                    value: Binding(
-                        get: { Double(minutes) },
-                        set: { minutes = Int($0.rounded()) }
-                    ),
-                    in: 1...240,
-                    step: 1
-                )
+            timerOptions
+            timerControls
+            recentTimers
+        }
+        .padding(.horizontal)
+        .onAppear {
+            loadPickerDuration(store.timerTargetSeconds)
+            pickerIsReady = true
+        }
+        .onChange(of: store.timerTargetSeconds) { _, newValue in
+            guard !timerIsActive else { return }
+            loadPickerDuration(newValue)
+        }
+        .sheet(isPresented: $showingTimerEndOptions) {
+            TimerEndOptionsSheet()
+        }
+    }
 
-                Stepper("Adjust duration", value: $minutes, in: 1...240)
-                    .labelsHidden()
-                    .controlSize(.large)
+    private var timerIsActive: Bool {
+        store.isFocusing || store.timerHasStarted
+    }
 
-                Text("Choose between 1 minute and 4 hours.")
-                    .font(.caption)
+    private var totalPickerSeconds: Int {
+        hours * 3_600 + minutes * 60 + seconds
+    }
+
+    private var activeTimerDisplay: some View {
+        ZStack {
+            Circle()
+                .stroke(Color.white.opacity(0.13), lineWidth: 8)
+            Circle()
+                .trim(from: 0, to: max(0.001, store.focusProgress))
+                .stroke(Color.orange, style: StrokeStyle(lineWidth: 8, lineCap: .round))
+                .rotationEffect(.degrees(-90))
+                .animation(.linear(duration: 0.25), value: store.focusProgress)
+
+            VStack(spacing: 7) {
+                Text(clockTime(store.displayedSeconds))
+                    .font(.system(size: store.displayedSeconds >= 3_600 ? 45 : 54, weight: .light, design: .rounded))
+                    .monospacedDigit()
+                    .minimumScaleFactor(0.7)
+                Text(store.focusLabel.isEmpty ? "Timer" : store.focusLabel)
+                    .font(.headline)
                     .foregroundStyle(.secondary)
-                Spacer()
+                    .lineLimit(1)
+                Text(store.isFocusing ? "Ends \(expectedEndTime)" : "Paused")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
             }
             .padding(28)
-            .navigationTitle("Custom timer")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Set") {
-                        store.setTimerPreset(minutes: minutes)
-                        dismiss()
+        }
+        .frame(width: 285, height: 285)
+        .frame(maxWidth: .infinity)
+    }
+
+    private var timerOptions: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("Label")
+                TextField("Timer", text: Binding(
+                    get: { store.focusLabel },
+                    set: { store.setFocusLabel($0) }
+                ))
+                .multilineTextAlignment(.trailing)
+                .disabled(timerIsActive)
+            }
+            .padding(.horizontal, 16)
+            .frame(height: 52)
+
+            Divider().overlay(Color.white.opacity(0.12))
+
+            Button {
+                showingTimerEndOptions = true
+            } label: {
+                HStack {
+                    Text("When Timer Ends")
+                        .foregroundStyle(.primary)
+                    Spacer()
+                    Text(store.timerEndAlert.rawValue)
+                        .foregroundStyle(.secondary)
+                    Image(systemName: "chevron.right")
+                        .font(.caption.bold())
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 16)
+            .frame(height: 52)
+        }
+        .background(Color(white: 0.11))
+        .clipShape(RoundedRectangle(cornerRadius: 11))
+    }
+
+    private var timerControls: some View {
+        HStack {
+            ClockControlButton(
+                title: "Cancel",
+                color: .gray,
+                isEnabled: timerIsActive
+            ) {
+                store.resetFocus()
+                loadPickerDuration(store.timerTargetSeconds)
+            }
+
+            Spacer()
+
+            ClockControlButton(
+                title: store.isFocusing ? "Pause" : (store.timerHasStarted ? "Resume" : "Start"),
+                color: timerIsActive ? .orange : .green,
+                isEnabled: timerIsActive || totalPickerSeconds > 0
+            ) {
+                if !timerIsActive {
+                    store.setTimerDuration(seconds: totalPickerSeconds)
+                }
+                store.toggleFocus()
+            }
+        }
+        .padding(.horizontal, 4)
+    }
+
+    private var recentTimers: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Recents")
+                .font(.title2.bold())
+
+            VStack(spacing: 0) {
+                ForEach(Array(recentDurations.enumerated()), id: \.element) { index, duration in
+                    Button {
+                        store.setTimerDuration(seconds: duration)
+                        loadPickerDuration(duration)
+                        store.toggleFocus()
+                    } label: {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(shortDuration(duration))
+                                    .font(.title3)
+                                    .foregroundStyle(.primary)
+                                Text("Focus")
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Image(systemName: "play.fill")
+                                .font(.headline)
+                                .foregroundStyle(.green)
+                                .frame(width: 38, height: 38)
+                                .background(Color.green.opacity(0.18))
+                                .clipShape(Circle())
+                        }
+                        .padding(.horizontal, 16)
+                        .frame(height: 66)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(timerIsActive)
+
+                    if index < recentDurations.count - 1 {
+                        Divider().padding(.leading, 16)
                     }
                 }
             }
+            .background(Color(white: 0.11))
+            .clipShape(RoundedRectangle(cornerRadius: 11))
         }
+    }
+
+    private var expectedEndTime: String {
+        (store.timerExpectedEndDate ?? Date().addingTimeInterval(TimeInterval(store.displayedSeconds)))
+            .formatted(date: .omitted, time: .shortened)
+    }
+
+    private func timerWheel(
+        title: String,
+        selection: Binding<Int>,
+        values: ClosedRange<Int>
+    ) -> some View {
+        Picker(title, selection: selection) {
+            ForEach(values, id: \.self) { value in
+                Text("\(value)")
+                    .font(.title2.monospacedDigit())
+                    .foregroundStyle(.white)
+                    .tag(value)
+            }
+        }
+        .pickerStyle(.wheel)
+        .frame(maxWidth: .infinity)
+        .overlay(alignment: .trailing) {
+            Text(title)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .padding(.trailing, 4)
+                .allowsHitTesting(false)
+        }
+        .clipped()
+        .accessibilityLabel(title)
+    }
+
+    private func updateDurationFromPicker() {
+        guard pickerIsReady, !timerIsActive, totalPickerSeconds > 0 else { return }
+        store.setTimerDuration(seconds: totalPickerSeconds)
+    }
+
+    private func loadPickerDuration(_ duration: Int) {
+        let clamped = min(max(1, duration), 86_399)
+        hours = clamped / 3_600
+        minutes = (clamped % 3_600) / 60
+        seconds = clamped % 60
+    }
+
+    private func clockTime(_ duration: Int) -> String {
+        if duration >= 3_600 {
+            return String(format: "%d:%02d:%02d", duration / 3_600, (duration % 3_600) / 60, duration % 60)
+        }
+        return String(format: "%02d:%02d", duration / 60, duration % 60)
+    }
+
+    private func shortDuration(_ duration: Int) -> String {
+        let hours = duration / 3_600
+        let minutes = (duration % 3_600) / 60
+        if hours > 0 { return minutes > 0 ? "\(hours) hr \(minutes) min" : "\(hours) hr" }
+        return "\(minutes) min"
+    }
+}
+
+private struct TimerEndOptionsSheet: View {
+    @EnvironmentObject private var store: FlowtimeStore
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.openURL) private var openURL
+    @State private var notificationStatus: UNAuthorizationStatus?
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    ForEach(TimerEndAlert.allCases) { option in
+                        Button {
+                            store.setTimerEndAlert(option)
+                        } label: {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(option.rawValue)
+                                        .foregroundStyle(.primary)
+                                    Text(option == .defaultSound ? "Long alarm sound and haptics" : "Notification without sound")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                if store.timerEndAlert == option {
+                                    Image(systemName: "checkmark")
+                                        .foregroundStyle(.orange)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Section {
+                    Button("Open Notification Settings") {
+                        if let url = URL(string: UIApplication.openNotificationSettingsURLString) {
+                            openURL(url)
+                        }
+                    }
+                } footer: {
+                    if notificationStatus == .denied {
+                        Text("Notifications are disabled for Flowtime. Enable them to receive timer alerts while the app is closed or your iPhone is locked.")
+                    } else {
+                        Text("To keep the banner on screen until you tap it, choose Banners and set Banner Style to Persistent in iPhone Settings.")
+                    }
+                }
+            }
+            .navigationTitle("When Timer Ends")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+            .task {
+                notificationStatus = await UNUserNotificationCenter.current().notificationSettings().authorizationStatus
+            }
+        }
+        .environment(\.colorScheme, .dark)
         .presentationDetents([.medium])
+    }
+}
+
+private struct ClockControlButton: View {
+    let title: String
+    let color: Color
+    let isEnabled: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(.body)
+                .foregroundStyle(isEnabled ? color : Color.secondary)
+                .frame(width: 76, height: 76)
+                .background((isEnabled ? color : Color.gray).opacity(isEnabled ? 0.18 : 0.1))
+                .clipShape(Circle())
+                .overlay {
+                    Circle()
+                        .stroke(Color.black, lineWidth: 2)
+                        .padding(3)
+                }
+        }
+        .buttonStyle(.plain)
+        .disabled(!isEnabled)
     }
 }
 
