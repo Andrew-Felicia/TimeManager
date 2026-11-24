@@ -2,29 +2,43 @@ import Foundation
 import UIKit
 import UserNotifications
 
+enum TaskPriority: String, CaseIterable, Identifiable, Codable {
+    case low = "Low"
+    case medium = "Medium"
+    case high = "High"
+
+    var id: String { rawValue }
+}
+
 struct FlowTask: Identifiable, Codable, Hashable {
     let id: String
     var title: String
     var estimate: Int
     var done: Bool
     var category: String?
+    var priority: TaskPriority
+    var scheduledAt: Date
 
     init(
         id: String,
         title: String,
         estimate: Int = 25,
         done: Bool = false,
-        category: String? = nil
+        category: String? = nil,
+        priority: TaskPriority = .medium,
+        scheduledAt: Date = Date()
     ) {
         self.id = id
         self.title = title
         self.estimate = estimate
         self.done = done
         self.category = category
+        self.priority = priority
+        self.scheduledAt = scheduledAt
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, title, estimate, done, category
+        case id, title, estimate, done, category, priority, scheduledAt
     }
 
     init(from decoder: Decoder) throws {
@@ -34,6 +48,8 @@ struct FlowTask: Identifiable, Codable, Hashable {
         estimate = min(1_439, max(1, try container.decodeIfPresent(Int.self, forKey: .estimate) ?? 25))
         done = try container.decodeIfPresent(Bool.self, forKey: .done) ?? false
         category = try container.decodeIfPresent(String.self, forKey: .category)
+        priority = try container.decodeIfPresent(TaskPriority.self, forKey: .priority) ?? .medium
+        scheduledAt = try container.decodeIfPresent(Date.self, forKey: .scheduledAt) ?? Date()
     }
 }
 
@@ -160,23 +176,26 @@ private struct PersistedTimerState: Codable {
     let remainingByTask: [String: Int]?
 }
 
-struct FocusSession: Codable, Hashable {
-    let completedAt: Date
-    let durationSeconds: Int
-    let category: String?
+struct FocusSession: Identifiable, Codable, Hashable {
+    let id: String
+    var completedAt: Date
+    var durationSeconds: Int
+    var category: String?
 
-    init(completedAt: Date, durationSeconds: Int, category: String?) {
+    init(id: String = UUID().uuidString, completedAt: Date, durationSeconds: Int, category: String?) {
+        self.id = id
         self.completedAt = completedAt
         self.durationSeconds = max(0, durationSeconds)
         self.category = category
     }
 
     private enum CodingKeys: String, CodingKey {
-        case completedAt, durationSeconds, category
+        case id, completedAt, durationSeconds, category
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeIfPresent(String.self, forKey: .id) ?? UUID().uuidString
         completedAt = try container.decode(Date.self, forKey: .completedAt)
         durationSeconds = max(0, try container.decode(Int.self, forKey: .durationSeconds))
         category = try container.decodeIfPresent(String.self, forKey: .category)
@@ -243,6 +262,8 @@ final class FlowtimeStore: ObservableObject {
             ]
         }
 
+        // Save migration defaults so priority and scheduled time stay stable for older tasks.
+        persistTasks()
         restoreFocusSessions()
         restoreTimerState()
     }
@@ -250,6 +271,10 @@ final class FlowtimeStore: ObservableObject {
     func events(on date: Date) -> [FlowEvent] {
         events.filter { Calendar.current.isDate($0.startsAt, inSameDayAs: date) }
             .sorted { $0.startsAt < $1.startsAt }
+    }
+
+    var activeTasks: [FlowTask] {
+        tasks.filter { !$0.done }
     }
 
     func addEvent(title: String, date: Date, startTime: Date, durationMinutes: Int, category: String, isAllDay: Bool) {
@@ -296,8 +321,11 @@ final class FlowtimeStore: ObservableObject {
         for index in events.indices where events[index].category == category {
             events[index].category = fallback
         }
-        for index in tasks.indices where tasks[index].category == category {
-            tasks[index].category = nil
+        tasks = tasks.map { task in
+            guard task.category == category else { return task }
+            var updatedTask = task
+            updatedTask.category = nil
+            return updatedTask
         }
         persistCategories()
         persistEvents()
@@ -306,23 +334,35 @@ final class FlowtimeStore: ObservableObject {
 
     func toggle(_ task: FlowTask) {
         guard let index = tasks.firstIndex(where: { $0.id == task.id }) else { return }
-        tasks[index].done.toggle()
-        let updatedTask = tasks[index]
+        var updatedTasks = tasks
+        updatedTasks[index].done.toggle()
+        tasks = updatedTasks
+        let updatedTask = updatedTasks[index]
         if updatedTask.done { removeTimer(for: updatedTask.id) }
         persistTasks()
     }
 
-    func addTask(title: String, estimate: Int, category: String?) {
+    func addTask(
+        title: String,
+        estimate: Int,
+        category: String?,
+        priority: TaskPriority,
+        scheduledAt: Date
+    ) {
         let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanTitle.isEmpty else { return }
         let task = FlowTask(
             id: UUID().uuidString,
             title: cleanTitle,
             estimate: min(1_439, max(1, estimate)),
-            category: normalizedTaskCategory(category)
+            category: normalizedTaskCategory(category),
+            priority: priority,
+            scheduledAt: scheduledAt
         )
-        tasks.insert(task, at: 0)
+        tasks = [task] + tasks
+        timerRemainingByTask[task.id] = task.estimate * 60
         persistTasks()
+        persistTimerState()
     }
 
     func updateTask(_ task: FlowTask) {
@@ -333,7 +373,9 @@ final class FlowtimeStore: ObservableObject {
         cleanTask.estimate = min(1_439, max(1, task.estimate))
         cleanTask.category = normalizedTaskCategory(task.category)
         guard !cleanTask.title.isEmpty else { return }
-        tasks[index] = cleanTask
+        var updatedTasks = tasks
+        updatedTasks[index] = cleanTask
+        tasks = updatedTasks
         syncTimer(with: cleanTask, previousEstimate: previousTask.estimate)
         persistTasks()
     }
@@ -350,6 +392,17 @@ final class FlowtimeStore: ObservableObject {
             return min(target, max(0, savedTimerSeconds))
         }
         return min(target, max(0, timerRemainingByTask[task.id] ?? target))
+    }
+
+    func synchronizeTaskTimers() {
+        let activeTaskIds = Set(activeTasks.map(\.id))
+        var synchronized = timerRemainingByTask.filter { activeTaskIds.contains($0.key) }
+        for task in activeTasks where synchronized[task.id] == nil {
+            synchronized[task.id] = task.estimate * 60
+        }
+        guard synchronized != timerRemainingByTask else { return }
+        timerRemainingByTask = synchronized
+        persistTimerState()
     }
 
     func timerHasStarted(for task: FlowTask) -> Bool {
@@ -713,6 +766,7 @@ final class FlowtimeStore: ObservableObject {
         if let data = UserDefaults.standard.data(forKey: focusSessionStorageKey),
            let sessions = try? JSONDecoder().decode([FocusSession].self, from: data) {
             focusSessions = sessions
+            persistFocusSessions()
         }
     }
 
@@ -722,6 +776,19 @@ final class FlowtimeStore: ObservableObject {
             durationSeconds: duration,
             category: normalizedTaskCategory(category)
         ))
+        persistFocusSessions()
+    }
+
+    func updateFocusSession(id: String, durationSeconds: Int, category: String?) {
+        guard let index = focusSessions.firstIndex(where: { $0.id == id }) else { return }
+        var updatedSessions = focusSessions
+        updatedSessions[index].durationSeconds = max(1, durationSeconds)
+        updatedSessions[index].category = normalizedTaskCategory(category)
+        focusSessions = updatedSessions
+        persistFocusSessions()
+    }
+
+    private func persistFocusSessions() {
         if let data = try? JSONEncoder().encode(focusSessions) {
             UserDefaults.standard.set(data, forKey: focusSessionStorageKey)
         }

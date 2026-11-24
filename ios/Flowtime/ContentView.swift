@@ -63,6 +63,22 @@ private func flowCategoryColor(_ category: String) -> Color {
     }
 }
 
+private func taskPriorityColor(_ priority: TaskPriority) -> Color {
+    switch priority {
+    case .low: return .blue
+    case .medium: return .orange
+    case .high: return .red
+    }
+}
+
+private func taskPriorityIcon(_ priority: TaskPriority) -> String {
+    switch priority {
+    case .low: return "arrow.down.circle.fill"
+    case .medium: return "minus.circle.fill"
+    case .high: return "exclamationmark.circle.fill"
+    }
+}
+
 private struct TodayView: View {
     @EnvironmentObject private var store: FlowtimeStore
     @State private var showingNewEvent = false
@@ -730,6 +746,14 @@ private struct TaskCell: View {
 
                 HStack(spacing: 12) {
                     Label(formattedTaskEstimate(task.estimate), systemImage: "clock")
+                    Label(task.priority.rawValue, systemImage: taskPriorityIcon(task.priority))
+                        .foregroundStyle(taskPriorityColor(task.priority))
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+                HStack(spacing: 12) {
+                    Label(formattedTaskSchedule(task.scheduledAt), systemImage: "calendar")
                     Label(task.category ?? "Other", systemImage: "tag")
                         .foregroundStyle(flowCategoryColor(task.category ?? "Other"))
                 }
@@ -760,7 +784,7 @@ private struct TaskListView: View {
     @State private var feedbackTrigger = 0
 
     private var openTasks: [FlowTask] {
-        store.tasks.filter { !$0.done }
+        store.activeTasks
     }
 
     private var completedTasks: [FlowTask] {
@@ -886,6 +910,8 @@ private struct TaskEditorSheet: View {
     @State private var title: String
     @State private var estimateMinutes: Int
     @State private var selectedCategory: String?
+    @State private var priority: TaskPriority
+    @State private var scheduledAt: Date
     @State private var showingCategories = false
     @FocusState private var titleFocused: Bool
     private let presets = [5, 15, 20, 25, 30, 60, 120]
@@ -896,6 +922,8 @@ private struct TaskEditorSheet: View {
         let initialEstimate = task?.estimate ?? 25
         _estimateMinutes = State(initialValue: min(1_439, max(1, initialEstimate)))
         _selectedCategory = State(initialValue: task?.category)
+        _priority = State(initialValue: task?.priority ?? .medium)
+        _scheduledAt = State(initialValue: task?.scheduledAt ?? Date())
     }
 
     var body: some View {
@@ -906,6 +934,18 @@ private struct TaskEditorSheet: View {
                         .lineLimit(1...3)
                         .font(.title3)
                         .focused($titleFocused)
+                }
+
+                Section("Priority") {
+                    TaskPrioritySelector(selection: $priority)
+                }
+
+                Section("When") {
+                    DatePicker(
+                        "Scheduled time",
+                        selection: $scheduledAt,
+                        displayedComponents: [.date, .hourAndMinute]
+                    )
                 }
 
                 Section("Estimated time") {
@@ -1012,11 +1052,58 @@ private struct TaskEditorSheet: View {
             updated.title = title
             updated.estimate = estimateMinutes
             updated.category = selectedCategory
+            updated.priority = priority
+            updated.scheduledAt = scheduledAt
             store.updateTask(updated)
         } else {
-            store.addTask(title: title, estimate: estimateMinutes, category: selectedCategory)
+            store.addTask(
+                title: title,
+                estimate: estimateMinutes,
+                category: selectedCategory,
+                priority: priority,
+                scheduledAt: scheduledAt
+            )
         }
         dismiss()
+    }
+}
+
+private struct TaskPrioritySelector: View {
+    @Binding var selection: TaskPriority
+
+    var body: some View {
+        HStack(spacing: 8) {
+            ForEach(TaskPriority.allCases) { priority in
+                Button {
+                    selection = priority
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: taskPriorityIcon(priority))
+                        Text(priority.rawValue)
+                            .fontWeight(.semibold)
+                    }
+                    .font(.subheadline)
+                    .foregroundStyle(selection == priority ? taskPriorityColor(priority) : Color.secondary)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+                    .background(
+                        selection == priority
+                            ? taskPriorityColor(priority).opacity(0.16)
+                            : Color.secondary.opacity(0.08),
+                        in: Capsule()
+                    )
+                    .overlay {
+                        Capsule()
+                            .stroke(
+                                selection == priority ? taskPriorityColor(priority).opacity(0.7) : Color.clear,
+                                lineWidth: 1
+                            )
+                    }
+                }
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(selection == priority ? .isSelected : [])
+            }
+        }
     }
 }
 
@@ -1027,6 +1114,14 @@ private func formattedTaskEstimate(_ minutes: Int) -> String {
     if hours == 0 { return "\(remainingMinutes) min" }
     if remainingMinutes == 0 { return hours == 1 ? "1 hr" : "\(hours) hr" }
     return "\(hours) hr \(remainingMinutes) min"
+}
+
+private func formattedTaskSchedule(_ date: Date) -> String {
+    let formatter = DateFormatter()
+    formatter.doesRelativeDateFormatting = true
+    formatter.dateStyle = .medium
+    formatter.timeStyle = .short
+    return formatter.string(from: date)
 }
 
 private struct FocusView: View {
@@ -1045,7 +1140,7 @@ private struct ClockTimerView: View {
     @State private var feedbackTrigger = 0
 
     private var availableTasks: [FlowTask] {
-        store.tasks.filter { !$0.done }
+        store.activeTasks
     }
 
     var body: some View {
@@ -1085,6 +1180,7 @@ private struct ClockTimerView: View {
             }
         }
         .sensoryFeedback(.selection, trigger: feedbackTrigger)
+        .onAppear { store.synchronizeTaskTimers() }
     }
 }
 
@@ -1109,9 +1205,18 @@ private struct TaskTimerCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .firstTextBaseline) {
-                Text(task.title)
-                    .font(.headline)
-                    .lineLimit(2)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(task.title)
+                        .font(.headline)
+                        .lineLimit(2)
+                    HStack(spacing: 10) {
+                        Label(task.category ?? "Other", systemImage: "tag")
+                            .foregroundStyle(flowCategoryColor(task.category ?? "Other"))
+                        Label(task.priority.rawValue, systemImage: taskPriorityIcon(task.priority))
+                            .foregroundStyle(taskPriorityColor(task.priority))
+                    }
+                    .font(.caption)
+                }
                 Spacer(minLength: 12)
                 Text(formattedTaskEstimate(task.estimate))
                     .font(.caption)
@@ -1409,6 +1514,7 @@ private struct InsightsView: View {
     @EnvironmentObject private var store: FlowtimeStore
     @State private var range: InsightRange = .week
     @State private var showingSettings = false
+    @State private var showingFocusHistory = false
 
     var body: some View {
         NavigationStack {
@@ -1521,6 +1627,15 @@ private struct InsightsView: View {
                                 }
                             }
                         }
+
+                        Button {
+                            showingFocusHistory = true
+                        } label: {
+                            Label("Edit Recorded Focus Time", systemImage: "slider.horizontal.3")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(store.focusSessions.isEmpty)
                     }
                 }
                 .padding()
@@ -1539,6 +1654,9 @@ private struct InsightsView: View {
             }
             .sheet(isPresented: $showingSettings) {
                 SettingsView()
+            }
+            .sheet(isPresented: $showingFocusHistory) {
+                FocusHistoryView()
             }
         }
     }
@@ -1716,6 +1834,213 @@ private struct InsightsView: View {
         }
         .frame(maxWidth: .infinity, minHeight: 150)
     }
+}
+
+private struct FocusHistoryView: View {
+    @EnvironmentObject private var store: FlowtimeStore
+    @Environment(\.dismiss) private var dismiss
+
+    private var sessions: [FocusSession] {
+        store.focusSessions.sorted { $0.completedAt > $1.completedAt }
+    }
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if sessions.isEmpty {
+                    ContentUnavailableView(
+                        "No Focus Sessions",
+                        systemImage: "timer",
+                        description: Text("Completed task timers will appear here for correction.")
+                    )
+                } else {
+                    List {
+                        Section {
+                            ForEach(sessions) { session in
+                                NavigationLink {
+                                    FocusSessionEditorView(session: session)
+                                } label: {
+                                    VStack(alignment: .leading, spacing: 6) {
+                                        HStack {
+                                            Label(
+                                                focusCategoryName(session.category),
+                                                systemImage: "tag.fill"
+                                            )
+                                            .foregroundStyle(flowCategoryColor(focusCategoryName(session.category)))
+
+                                            Spacer()
+
+                                            Text(formattedFocusDuration(session.durationSeconds))
+                                                .font(.subheadline.weight(.semibold))
+                                                .monospacedDigit()
+                                                .foregroundStyle(.primary)
+                                        }
+
+                                        Text(session.completedAt.formatted(date: .abbreviated, time: .shortened))
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    .padding(.vertical, 4)
+                                }
+                            }
+                        } footer: {
+                            Text("Edit a session’s category or exact duration. Every Insights total and chart updates from the corrected record.")
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Recorded Focus Time")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+    }
+}
+
+private struct FocusSessionEditorView: View {
+    @EnvironmentObject private var store: FlowtimeStore
+    @Environment(\.dismiss) private var dismiss
+    let sessionId: String
+    let completedAt: Date
+    @State private var durationSeconds: Int
+    @State private var selectedCategory: String?
+    @State private var showingCategories = false
+
+    init(session: FocusSession) {
+        sessionId = session.id
+        completedAt = session.completedAt
+        _durationSeconds = State(initialValue: min(86_399, max(1, session.durationSeconds)))
+        _selectedCategory = State(initialValue: session.category)
+    }
+
+    var body: some View {
+        Form {
+            Section {
+                LabeledContent("Completed") {
+                    Text(completedAt.formatted(date: .abbreviated, time: .shortened))
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Section("Time Spent") {
+                HStack(spacing: 0) {
+                    durationPicker("Hours", selection: durationHours, range: 0...23)
+                    Text("h").foregroundStyle(.secondary)
+                    durationPicker("Minutes", selection: durationMinutes, range: 0...59)
+                    Text("m").foregroundStyle(.secondary)
+                    durationPicker("Seconds", selection: durationSecondPart, range: 0...59)
+                    Text("s").foregroundStyle(.secondary)
+                }
+                .frame(height: 145)
+            }
+
+            Section {
+                Picker("Category", selection: $selectedCategory) {
+                    Text("Other").tag(Optional<String>.none)
+                    ForEach(store.categories, id: \.self) { category in
+                        Text(category).tag(Optional(category))
+                    }
+                }
+
+                Button("Manage Categories", systemImage: "tag") {
+                    showingCategories = true
+                }
+            } header: {
+                Text("Category")
+            } footer: {
+                Text("Saving recalculates lifetime, day, week, month, year, chart, and category figures.")
+            }
+        }
+        .navigationTitle("Edit Focus Time")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .confirmationAction) {
+                Button("Save", action: save)
+            }
+        }
+        .onAppear {
+            guard let selectedCategory,
+                  !store.categories.contains(where: {
+                      $0.localizedCaseInsensitiveCompare(selectedCategory) == .orderedSame
+                  }) else { return }
+            self.selectedCategory = nil
+        }
+        .sheet(isPresented: $showingCategories) {
+            CategoryManagerSheet()
+        }
+        .sensoryFeedback(.selection, trigger: durationSeconds)
+    }
+
+    private func durationPicker(
+        _ title: String,
+        selection: Binding<Int>,
+        range: ClosedRange<Int>
+    ) -> some View {
+        Picker(title, selection: selection) {
+            ForEach(range, id: \.self) { value in
+                Text(String(format: "%02d", value)).tag(value)
+            }
+        }
+        .pickerStyle(.wheel)
+        .labelsHidden()
+        .frame(maxWidth: .infinity)
+        .clipped()
+    }
+
+    private var durationHours: Binding<Int> {
+        Binding(
+            get: { durationSeconds / 3_600 },
+            set: { hours in
+                durationSeconds = max(1, hours * 3_600 + (durationSeconds % 3_600))
+            }
+        )
+    }
+
+    private var durationMinutes: Binding<Int> {
+        Binding(
+            get: { (durationSeconds % 3_600) / 60 },
+            set: { minutes in
+                durationSeconds = max(1, (durationSeconds / 3_600) * 3_600 + minutes * 60 + durationSeconds % 60)
+            }
+        )
+    }
+
+    private var durationSecondPart: Binding<Int> {
+        Binding(
+            get: { durationSeconds % 60 },
+            set: { seconds in
+                durationSeconds = max(1, (durationSeconds / 60) * 60 + seconds)
+            }
+        )
+    }
+
+    private func save() {
+        store.updateFocusSession(
+            id: sessionId,
+            durationSeconds: durationSeconds,
+            category: selectedCategory
+        )
+        dismiss()
+    }
+}
+
+private func focusCategoryName(_ category: String?) -> String {
+    guard let category = category?.trimmingCharacters(in: .whitespacesAndNewlines),
+          !category.isEmpty else { return "Other" }
+    return category
+}
+
+private func formattedFocusDuration(_ seconds: Int) -> String {
+    let safeSeconds = max(0, seconds)
+    return String(
+        format: "%02d h %02d m %02d s",
+        safeSeconds / 3_600,
+        (safeSeconds % 3_600) / 60,
+        safeSeconds % 60
+    )
 }
 
 private struct InsightCard<Content: View>: View {
