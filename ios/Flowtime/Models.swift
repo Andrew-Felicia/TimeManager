@@ -2,73 +2,34 @@ import Foundation
 import UIKit
 import UserNotifications
 
-struct FlowSubtask: Identifiable, Codable, Hashable {
-    let id: String
-    var title: String
-    var done: Bool
-}
-
-struct FlowTaskList: Identifiable, Codable, Hashable {
-    let id: String
-    var name: String
-}
-
 struct FlowTask: Identifiable, Codable, Hashable {
     let id: String
     var title: String
-    var dueAt: String?
-    var category: String
     var estimate: Int
     var done: Bool
-    var listId: String
-    var details: String
-    var deadline: Date?
-    var scheduledAt: Date?
-    var subtasks: [FlowSubtask]
 
     init(
         id: String,
         title: String,
-        dueAt: String? = nil,
-        category: String = "Work",
         estimate: Int = 25,
-        done: Bool = false,
-        listId: String = "inbox",
-        details: String = "",
-        deadline: Date? = nil,
-        scheduledAt: Date? = nil,
-        subtasks: [FlowSubtask] = []
+        done: Bool = false
     ) {
         self.id = id
         self.title = title
-        self.dueAt = dueAt
-        self.category = category
         self.estimate = estimate
         self.done = done
-        self.listId = listId
-        self.details = details
-        self.deadline = deadline
-        self.scheduledAt = scheduledAt
-        self.subtasks = subtasks
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, title, dueAt, category, estimate, done, listId, details, deadline, scheduledAt, subtasks
+        case id, title, estimate, done
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(String.self, forKey: .id)
         title = try container.decode(String.self, forKey: .title)
-        dueAt = try container.decodeIfPresent(String.self, forKey: .dueAt)
-        category = try container.decodeIfPresent(String.self, forKey: .category) ?? "Work"
-        estimate = try container.decodeIfPresent(Int.self, forKey: .estimate) ?? 25
+        estimate = min(1_439, max(1, try container.decodeIfPresent(Int.self, forKey: .estimate) ?? 25))
         done = try container.decodeIfPresent(Bool.self, forKey: .done) ?? false
-        listId = try container.decodeIfPresent(String.self, forKey: .listId) ?? "inbox"
-        details = try container.decodeIfPresent(String.self, forKey: .details) ?? ""
-        deadline = try container.decodeIfPresent(Date.self, forKey: .deadline)
-        scheduledAt = try container.decodeIfPresent(Date.self, forKey: .scheduledAt)
-        subtasks = try container.decodeIfPresent([FlowSubtask].self, forKey: .subtasks) ?? []
     }
 }
 
@@ -106,24 +67,38 @@ struct FlowEvent: Identifiable, Codable, Hashable {
     }
 }
 
-enum FocusMode: String, CaseIterable, Identifiable {
-    case timer = "Timer"
-    case stopwatch = "Stopwatch"
-    var id: String { rawValue }
-}
-
-struct StopwatchLap: Identifiable, Codable, Hashable {
-    let id: UUID
-    let number: Int
-    let duration: TimeInterval
-    let totalElapsed: TimeInterval
-}
-
 enum TimerEndAlert: String, CaseIterable, Identifiable, Codable {
     case defaultSound = "Default"
+    case chime = "Chime"
+    case pulse = "Pulse"
+    case jetLock = "Jet Lock"
     case silent = "Silent"
 
     var id: String { rawValue }
+
+    var displayName: String {
+        self == .defaultSound ? "Classic" : rawValue
+    }
+
+    var description: String {
+        switch self {
+        case .defaultSound: return "Alternating alarm"
+        case .chime: return "Bright three-note chime"
+        case .pulse: return "Electronic double pulse"
+        case .jetLock: return "Original fighter-jet radar warning"
+        case .silent: return "Notification without sound"
+        }
+    }
+
+    var soundFileName: String? {
+        switch self {
+        case .defaultSound: return "flowtime-alarm.wav"
+        case .chime: return "flowtime-chime.wav"
+        case .pulse: return "flowtime-pulse.wav"
+        case .jetLock: return "flowtime-jet-lock.wav"
+        case .silent: return nil
+        }
+    }
 }
 
 enum TimerNotificationConstants {
@@ -153,13 +128,7 @@ private struct PersistedTimerState: Codable {
     let selectedTaskId: String?
     let endAlert: TimerEndAlert?
     let isRinging: Bool?
-}
-
-private struct PersistedStopwatchState: Codable {
-    let accumulatedTime: TimeInterval
-    let startDate: Date?
-    let isRunning: Bool
-    let laps: [StopwatchLap]
+    let remainingByTask: [String: Int]?
 }
 
 private struct PersistedFocusSession: Codable {
@@ -170,52 +139,30 @@ private struct PersistedFocusSession: Codable {
 @MainActor
 final class FlowtimeStore: ObservableObject {
     @Published private(set) var tasks: [FlowTask]
-    @Published private(set) var taskLists: [FlowTaskList]
     @Published private(set) var events: [FlowEvent]
     @Published private(set) var categories: [String]
     @Published var selectedDate = Date()
-    @Published var focusMode: FocusMode = .timer
-    @Published var focusSeconds = 3_000
-    @Published var timerTargetSeconds = 3_000
-    @Published var isFocusing = false
     @Published private(set) var selectedFocusTaskId: String?
-    @Published private(set) var focusLabel = ""
     @Published private(set) var timerEndAlert: TimerEndAlert = .defaultSound
     @Published private(set) var timerIsRinging = false
-    @Published private(set) var stopwatchIsRunning = false
-    @Published private(set) var stopwatchLaps: [StopwatchLap] = []
+    @Published private(set) var timerRemainingByTask: [String: Int] = [:]
     @Published var weeklyFocusSeconds = 0
     @Published var sessionCount = 0
 
     private var ticker: Timer?
-    private var savedTimerSeconds = 3_000
+    private var savedTimerSeconds = 0
+    private var timerTargetSeconds = 0
     private var timerIsRunning = false
     private var timerEndDate: Date?
-    private var stopwatchAccumulatedTime: TimeInterval = 0
-    private var stopwatchStartDate: Date?
+    private var focusLabel = ""
     private var focusSessions: [PersistedFocusSession] = []
     private let taskStorageKey = "flowtime.tasks.v1"
-    private let taskListStorageKey = "flowtime.task-lists.v1"
     private let eventStorageKey = "flowtime.events.v1"
     private let categoryStorageKey = "flowtime.categories.v1"
     private let timerStorageKey = "flowtime.timer.v1"
-    private let stopwatchStorageKey = "flowtime.stopwatch.v1"
     private let focusSessionStorageKey = "flowtime.focus-sessions.v1"
 
     init() {
-        var initialTaskLists: [FlowTaskList]
-        if let data = UserDefaults.standard.data(forKey: taskListStorageKey),
-           let savedLists = try? JSONDecoder().decode([FlowTaskList].self, from: data),
-           !savedLists.isEmpty {
-            initialTaskLists = savedLists
-        } else {
-            initialTaskLists = [FlowTaskList(id: "inbox", name: "Inbox")]
-        }
-        if !initialTaskLists.contains(where: { $0.id == "inbox" }) {
-            initialTaskLists.insert(FlowTaskList(id: "inbox", name: "Inbox"), at: 0)
-        }
-        taskLists = initialTaskLists
-
         if let savedCategories = UserDefaults.standard.stringArray(forKey: categoryStorageKey),
            !savedCategories.isEmpty {
             categories = savedCategories
@@ -228,9 +175,9 @@ final class FlowtimeStore: ObservableObject {
             tasks = savedTasks
         } else {
             tasks = [
-                .init(id: "t1", title: "Review project brief", dueAt: "Today", category: "Work", estimate: 10, done: false),
-                .init(id: "t2", title: "Book dentist", dueAt: "Today", category: "Personal", estimate: 5, done: false),
-                .init(id: "t3", title: "Prepare weekly notes", dueAt: "Tomorrow", category: "Work", estimate: 30, done: false)
+                .init(id: "t1", title: "Review project brief", estimate: 10),
+                .init(id: "t2", title: "Book dentist", estimate: 5),
+                .init(id: "t3", title: "Prepare weekly notes", estimate: 30)
             ]
         }
 
@@ -253,32 +200,6 @@ final class FlowtimeStore: ObservableObject {
 
         restoreFocusSessions()
         restoreTimerState()
-        restoreStopwatchState()
-    }
-
-    var displayedSeconds: Int { focusSeconds }
-    var isAnyFocusRunning: Bool { timerIsRunning || stopwatchIsRunning }
-    var timerHasStarted: Bool { savedTimerSeconds < timerTargetSeconds }
-    var timerExpectedEndDate: Date? { timerIsRunning ? timerEndDate : nil }
-    var stopwatchHasStarted: Bool {
-        stopwatchIsRunning || stopwatchAccumulatedTime > 0 || !stopwatchLaps.isEmpty
-    }
-
-    func stopwatchElapsed(at date: Date = Date()) -> TimeInterval {
-        guard stopwatchIsRunning, let stopwatchStartDate else { return stopwatchAccumulatedTime }
-        return max(0, stopwatchAccumulatedTime + date.timeIntervalSince(stopwatchStartDate))
-    }
-
-    func stopwatchCurrentLapElapsed(at date: Date = Date()) -> TimeInterval {
-        max(0, stopwatchElapsed(at: date) - (stopwatchLaps.last?.totalElapsed ?? 0))
-    }
-
-    var focusProgress: Double {
-        if focusMode == .timer {
-            guard timerTargetSeconds > 0 else { return 0 }
-            return min(1, max(0, Double(focusSeconds) / Double(timerTargetSeconds)))
-        }
-        return min(1, Double(focusSeconds % 3_600) / 3_600)
     }
 
     func events(on date: Date) -> [FlowEvent] {
@@ -338,33 +259,17 @@ final class FlowtimeStore: ObservableObject {
         guard let index = tasks.firstIndex(where: { $0.id == task.id }) else { return }
         tasks[index].done.toggle()
         let updatedTask = tasks[index]
-        if updatedTask.done, selectedFocusTaskId == updatedTask.id {
-            selectFocusTask(nil)
-        }
+        if updatedTask.done { removeTimer(for: updatedTask.id) }
         persistTasks()
     }
 
-    func addTask(
-        title: String,
-        listId: String,
-        details: String,
-        estimate: Int,
-        deadline: Date?,
-        scheduledAt: Date?,
-        subtasks: [FlowSubtask]
-    ) {
+    func addTask(title: String, estimate: Int) {
         let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanTitle.isEmpty else { return }
         let task = FlowTask(
             id: UUID().uuidString,
             title: cleanTitle,
-            category: "Uncategorized",
-            estimate: estimate,
-            listId: taskLists.contains(where: { $0.id == listId }) ? listId : (taskLists.first?.id ?? "inbox"),
-            details: details.trimmingCharacters(in: .whitespacesAndNewlines),
-            deadline: deadline,
-            scheduledAt: scheduledAt,
-            subtasks: subtasks.filter { !$0.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            estimate: min(1_439, max(1, estimate))
         )
         tasks.insert(task, at: 0)
         persistTasks()
@@ -372,76 +277,60 @@ final class FlowtimeStore: ObservableObject {
 
     func updateTask(_ task: FlowTask) {
         guard let index = tasks.firstIndex(where: { $0.id == task.id }) else { return }
+        let previousTask = tasks[index]
         var cleanTask = task
         cleanTask.title = task.title.trimmingCharacters(in: .whitespacesAndNewlines)
-        cleanTask.details = task.details.trimmingCharacters(in: .whitespacesAndNewlines)
-        cleanTask.subtasks = task.subtasks.filter { !$0.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        cleanTask.estimate = min(1_439, max(1, task.estimate))
         guard !cleanTask.title.isEmpty else { return }
         tasks[index] = cleanTask
-        if selectedFocusTaskId == cleanTask.id {
-            focusLabel = cleanTask.title
-            if !timerIsRunning {
-                timerTargetSeconds = max(60, cleanTask.estimate * 60)
-                savedTimerSeconds = timerTargetSeconds
-                if focusMode == .timer { focusSeconds = savedTimerSeconds }
-            }
-        }
-        persistTasks()
-    }
-
-    func addTaskList(_ name: String) -> String? {
-        let cleanName = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !cleanName.isEmpty,
-              !taskLists.contains(where: { $0.name.localizedCaseInsensitiveCompare(cleanName) == .orderedSame }) else { return nil }
-        let list = FlowTaskList(id: UUID().uuidString, name: cleanName)
-        taskLists.append(list)
-        persistTaskLists()
-        return list.id
-    }
-
-    func deleteTaskList(_ list: FlowTaskList) {
-        guard taskLists.count > 1, let fallback = taskLists.first(where: { $0.id != list.id }) else { return }
-        taskLists.removeAll { $0.id == list.id }
-        let changedTasks = tasks.indices.filter { tasks[$0].listId == list.id }
-        for index in changedTasks { tasks[index].listId = fallback.id }
-        persistTaskLists()
+        syncTimer(with: cleanTask, previousEstimate: previousTask.estimate)
         persistTasks()
     }
 
     func delete(_ task: FlowTask) {
+        removeTimer(for: task.id)
         tasks.removeAll { $0.id == task.id }
-        if selectedFocusTaskId == task.id { selectFocusTask(nil) }
         persistTasks()
     }
 
-    func delete(at offsets: IndexSet, from visibleTasks: [FlowTask]) {
-        let deletedTasks = offsets.map { visibleTasks[$0] }
-        let ids = deletedTasks.map(\.id)
-        tasks.removeAll { ids.contains($0.id) }
-        if let selectedFocusTaskId, ids.contains(selectedFocusTaskId) { selectFocusTask(nil) }
-        persistTasks()
-    }
-
-    func selectFocusTask(_ id: String?) {
-        stopTimerForTaskSelection()
-        guard let id, let task = tasks.first(where: { $0.id == id && !$0.done }) else {
-            selectedFocusTaskId = nil
-            focusLabel = ""
-            persistTimerState()
-            return
+    func timerRemainingSeconds(for task: FlowTask) -> Int {
+        let target = task.estimate * 60
+        if selectedFocusTaskId == task.id {
+            return min(target, max(0, savedTimerSeconds))
         }
-        selectedFocusTaskId = id
-        focusLabel = task.title
-        focusMode = .timer
-        timerTargetSeconds = max(60, task.estimate * 60)
-        focusSeconds = timerTargetSeconds
-        savedTimerSeconds = timerTargetSeconds
-        persistTimerState()
+        return min(target, max(0, timerRemainingByTask[task.id] ?? target))
     }
 
-    func setFocusLabel(_ label: String) {
-        selectedFocusTaskId = nil
-        focusLabel = label
+    func timerHasStarted(for task: FlowTask) -> Bool {
+        timerRemainingSeconds(for: task) < task.estimate * 60
+    }
+
+    func timerIsRunning(for task: FlowTask) -> Bool {
+        timerIsRunning && selectedFocusTaskId == task.id
+    }
+
+    func toggleTimer(for task: FlowTask) {
+        guard !task.done, tasks.contains(where: { $0.id == task.id && !$0.done }) else { return }
+        if timerIsRunning(for: task) {
+            pauseActiveTimer()
+        } else {
+            startTimer(for: task)
+        }
+    }
+
+    func resetTimer(for task: FlowTask) {
+        let target = task.estimate * 60
+        if selectedFocusTaskId == task.id {
+            if timerIsRunning { reconcileTimer() }
+            timerIsRunning = false
+            timerEndDate = nil
+            timerIsRinging = false
+            cancelTimerNotification()
+            timerTargetSeconds = target
+            savedTimerSeconds = target
+        }
+        timerRemainingByTask[task.id] = target
+        updateTicker()
         persistTimerState()
     }
 
@@ -457,193 +346,112 @@ final class FlowtimeStore: ObservableObject {
         }
     }
 
-    func setFocusMode(_ mode: FocusMode) {
-        guard mode != focusMode else { return }
-        saveDisplayedFocusTime()
-        focusMode = mode
-        refreshSelectedFocusState()
-    }
+    private func startTimer(for task: FlowTask) {
+        if timerIsRunning { pauseActiveTimer() }
+        if let selectedFocusTaskId {
+            timerRemainingByTask[selectedFocusTaskId] = savedTimerSeconds
+        }
 
-    func setTimerPreset(minutes: Int) {
-        setTimerDuration(seconds: minutes * 60)
-    }
+        let target = task.estimate * 60
+        var remaining = timerRemainingByTask[task.id] ?? target
+        if remaining <= 0 || remaining > target { remaining = target }
 
-    func setTimerDuration(seconds: Int) {
-        pauseFocus()
+        selectedFocusTaskId = task.id
+        focusLabel = task.title
+        timerTargetSeconds = target
+        savedTimerSeconds = remaining
+        timerRemainingByTask[task.id] = remaining
         timerIsRinging = false
-        timerTargetSeconds = max(1, seconds)
-        focusSeconds = timerTargetSeconds
-        savedTimerSeconds = timerTargetSeconds
-        timerEndDate = nil
+        timerIsRunning = true
+        timerEndDate = Date().addingTimeInterval(TimeInterval(remaining))
         cancelTimerNotification()
-        persistTimerState()
-    }
-
-    func toggleFocus() {
-        if focusMode == .stopwatch {
-            toggleStopwatch()
-            return
-        }
-        if timerIsRinging {
-            stopTimerAlarm()
-            return
-        }
-        if timerIsRunning {
-            reconcileTimer()
-            timerEndDate = nil
-            timerIsRunning = false
-            cancelTimerNotification()
-        } else {
-            if savedTimerSeconds == 0 {
-                savedTimerSeconds = timerTargetSeconds
-            }
-            if focusLabel.isEmpty { focusLabel = "Focus" }
-            timerIsRunning = true
-            timerEndDate = Date().addingTimeInterval(TimeInterval(savedTimerSeconds))
-            scheduleTimerNotification()
-        }
-        refreshSelectedFocusState()
+        scheduleTimerNotification()
         updateTicker()
         persistTimerState()
     }
 
-    func toggleStopwatch() {
-        if stopwatchIsRunning {
-            pauseStopwatch()
-        } else {
-            stopwatchStartDate = Date()
-            stopwatchIsRunning = true
-            refreshSelectedFocusState()
-            persistStopwatchState()
+    private func pauseActiveTimer() {
+        guard timerIsRunning else { return }
+        reconcileTimer()
+        guard timerIsRunning else { return }
+        timerIsRunning = false
+        timerEndDate = nil
+        if let selectedFocusTaskId {
+            timerRemainingByTask[selectedFocusTaskId] = savedTimerSeconds
         }
-    }
-
-    func recordStopwatchLap() {
-        guard stopwatchIsRunning else { return }
-        let total = stopwatchElapsed()
-        let lapDuration = max(0, total - (stopwatchLaps.last?.totalElapsed ?? 0))
-        stopwatchLaps.append(
-            StopwatchLap(
-                id: UUID(),
-                number: stopwatchLaps.count + 1,
-                duration: lapDuration,
-                totalElapsed: total
-            )
-        )
-        persistStopwatchState()
-    }
-
-    func resetStopwatch() {
-        guard !stopwatchIsRunning else { return }
-        let completedDuration = Int(stopwatchAccumulatedTime.rounded(.down))
-        if completedDuration > 0 {
-            recordFocusSession(duration: completedDuration)
-        }
-        stopwatchAccumulatedTime = 0
-        stopwatchStartDate = nil
-        stopwatchLaps = []
-        refreshSelectedFocusState()
-        persistStopwatchState()
-    }
-
-    func pauseFocus() {
-        if focusMode == .timer {
-            if timerIsRunning {
-                reconcileTimer()
-                timerEndDate = nil
-                timerIsRunning = false
-                cancelTimerNotification()
-            }
-            persistTimerState()
-        } else if stopwatchIsRunning {
-            pauseStopwatch()
-        }
-        refreshSelectedFocusState()
+        cancelTimerNotification()
         updateTicker()
+        persistTimerState()
     }
 
-    func resetFocus() {
-        if focusMode == .timer {
-            pauseFocus()
-            timerIsRinging = false
-            cancelTimerNotification()
-            savedTimerSeconds = timerTargetSeconds
-            focusSeconds = savedTimerSeconds
-            persistTimerState()
-        } else {
-            if stopwatchIsRunning { pauseStopwatch() }
-            resetStopwatch()
-        }
-    }
+    private func syncTimer(with task: FlowTask, previousEstimate: Int) {
+        let oldTarget = previousEstimate * 60
+        let newTarget = task.estimate * 60
 
-    func finishFocus() {
-        saveDisplayedFocusTime()
-        finishFocus(mode: focusMode)
-    }
-
-    private func finishFocus(mode: FocusMode, preserveCompletionNotification: Bool = false) {
-        if mode == .stopwatch, stopwatchIsRunning {
-            pauseStopwatch()
-        }
-        let duration = mode == .timer
-            ? timerTargetSeconds - savedTimerSeconds
-            : Int(stopwatchAccumulatedTime.rounded(.down))
-        if mode == .timer {
-            timerIsRunning = false
-            timerEndDate = nil
-            if preserveCompletionNotification {
-                timerIsRinging = false
-                UINotificationFeedbackGenerator().notificationOccurred(.success)
-            } else {
-                timerIsRinging = false
-                cancelTimerNotification()
-            }
-        }
-        guard duration > 0 else {
-            resetFocusValue(for: mode)
-            refreshSelectedFocusState()
-            updateTicker()
-            if mode == .timer { persistTimerState() } else { persistStopwatchState() }
-            return
-        }
-        recordFocusSession(duration: duration)
-        resetFocusValue(for: mode)
-        refreshSelectedFocusState()
-        updateTicker()
-        if mode == .timer { persistTimerState() } else { persistStopwatchState() }
-    }
-
-    private func saveDisplayedFocusTime() {
-        if focusMode == .timer {
+        if selectedFocusTaskId == task.id {
             if timerIsRunning { reconcileTimer() }
-        } else {
-            reconcileStopwatch()
+            let elapsed = max(0, oldTarget - savedTimerSeconds)
+            let remaining = max(0, newTarget - elapsed)
+            focusLabel = task.title
+            timerTargetSeconds = newTarget
+            savedTimerSeconds = remaining
+            timerRemainingByTask[task.id] = remaining
+
+            if timerIsRunning {
+                if remaining == 0 {
+                    finishTimer(preserveCompletionNotification: false)
+                    return
+                }
+                timerEndDate = Date().addingTimeInterval(TimeInterval(remaining))
+                cancelTimerNotification()
+                scheduleTimerNotification()
+            } else if remaining == 0 {
+                savedTimerSeconds = newTarget
+                timerRemainingByTask[task.id] = newTarget
+            }
+        } else if let oldRemaining = timerRemainingByTask[task.id] {
+            let elapsed = max(0, oldTarget - oldRemaining)
+            let remaining = max(0, newTarget - elapsed)
+            timerRemainingByTask[task.id] = remaining == 0 ? newTarget : remaining
         }
+        persistTimerState()
     }
 
-    private func resetFocusValue(for mode: FocusMode) {
-        if mode == .timer {
-            savedTimerSeconds = timerTargetSeconds
-        } else {
-            stopwatchAccumulatedTime = 0
-            stopwatchStartDate = nil
-            stopwatchIsRunning = false
-            stopwatchLaps = []
+    private func removeTimer(for taskId: String) {
+        guard selectedFocusTaskId == taskId else {
+            timerRemainingByTask.removeValue(forKey: taskId)
+            persistTimerState()
+            return
         }
-    }
-
-    private func refreshSelectedFocusState() {
-        focusSeconds = focusMode == .timer ? savedTimerSeconds : Int(stopwatchElapsed().rounded(.down))
-        isFocusing = focusMode == .timer ? timerIsRunning : stopwatchIsRunning
-    }
-
-    private func stopTimerForTaskSelection() {
         if timerIsRunning { reconcileTimer() }
+        timerRemainingByTask.removeValue(forKey: taskId)
         timerIsRunning = false
         timerEndDate = nil
         timerIsRinging = false
+        selectedFocusTaskId = nil
+        focusLabel = ""
+        timerTargetSeconds = 0
+        savedTimerSeconds = 0
         cancelTimerNotification()
-        refreshSelectedFocusState()
+        updateTicker()
+        persistTimerState()
+    }
+
+    private func finishTimer(preserveCompletionNotification: Bool) {
+        let duration = max(0, timerTargetSeconds - savedTimerSeconds)
+        timerIsRunning = false
+        timerEndDate = nil
+        timerIsRinging = false
+        if preserveCompletionNotification {
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
+        } else {
+            cancelTimerNotification()
+        }
+        if duration > 0 { recordFocusSession(duration: duration) }
+        savedTimerSeconds = timerTargetSeconds
+        if let selectedFocusTaskId {
+            timerRemainingByTask[selectedFocusTaskId] = savedTimerSeconds
+        }
         updateTicker()
         persistTimerState()
     }
@@ -674,8 +482,6 @@ final class FlowtimeStore: ObservableObject {
 
     func reconcileClocks() {
         if timerIsRunning { reconcileTimer() }
-        if stopwatchIsRunning { reconcileStopwatch() }
-        refreshSelectedFocusState()
         updateTicker()
     }
 
@@ -685,9 +491,11 @@ final class FlowtimeStore: ObservableObject {
         timerEndDate = nil
         timerIsRinging = false
         savedTimerSeconds = timerTargetSeconds
+        if let selectedFocusTaskId {
+            timerRemainingByTask[selectedFocusTaskId] = savedTimerSeconds
+        }
         cancelTimerNotification()
         UserDefaults.standard.removeObject(forKey: TimerNotificationConstants.stopRequestStorageKey)
-        refreshSelectedFocusState()
         updateTicker()
         persistTimerState()
     }
@@ -695,31 +503,20 @@ final class FlowtimeStore: ObservableObject {
     private func reconcileTimer(now: Date = Date()) {
         guard timerIsRunning, let timerEndDate else { return }
         savedTimerSeconds = max(0, Int(ceil(timerEndDate.timeIntervalSince(now))))
-        if focusMode == .timer { focusSeconds = savedTimerSeconds }
+        if let selectedFocusTaskId {
+            timerRemainingByTask[selectedFocusTaskId] = savedTimerSeconds
+        }
         if savedTimerSeconds == 0 {
-            finishFocus(mode: .timer, preserveCompletionNotification: true)
+            finishTimer(preserveCompletionNotification: true)
         } else {
             persistTimerState()
         }
     }
 
-    private func reconcileStopwatch(now: Date = Date()) {
-        guard stopwatchIsRunning else { return }
-        if focusMode == .stopwatch {
-            focusSeconds = Int(stopwatchElapsed(at: now).rounded(.down))
-        }
-    }
-
-    private func pauseStopwatch(now: Date = Date()) {
-        guard stopwatchIsRunning else { return }
-        stopwatchAccumulatedTime = stopwatchElapsed(at: now)
-        stopwatchStartDate = nil
-        stopwatchIsRunning = false
-        refreshSelectedFocusState()
-        persistStopwatchState()
-    }
-
     private func persistTimerState() {
+        if let selectedFocusTaskId {
+            timerRemainingByTask[selectedFocusTaskId] = savedTimerSeconds
+        }
         let state = PersistedTimerState(
             targetSeconds: timerTargetSeconds,
             remainingSeconds: savedTimerSeconds,
@@ -728,7 +525,8 @@ final class FlowtimeStore: ObservableObject {
             label: focusLabel,
             selectedTaskId: selectedFocusTaskId,
             endAlert: timerEndAlert,
-            isRinging: timerIsRinging
+            isRinging: timerIsRinging,
+            remainingByTask: timerRemainingByTask
         )
         guard let data = try? JSONEncoder().encode(state) else { return }
         UserDefaults.standard.set(data, forKey: timerStorageKey)
@@ -738,28 +536,48 @@ final class FlowtimeStore: ObservableObject {
         guard let data = UserDefaults.standard.data(forKey: timerStorageKey),
               let state = try? JSONDecoder().decode(PersistedTimerState.self, from: data) else { return }
 
-        timerTargetSeconds = max(1, state.targetSeconds)
-        savedTimerSeconds = min(max(0, state.remainingSeconds), timerTargetSeconds)
-        focusLabel = state.label
         timerEndAlert = state.endAlert ?? .defaultSound
-        // Older builds kept the timer blocked after its banner disappeared.
-        // Completion alerts now run independently, so always restore an idle timer.
         let wasBlockedByOldRingingState = state.isRinging ?? false
         timerIsRinging = false
-        if let taskId = state.selectedTaskId, tasks.contains(where: { $0.id == taskId && !$0.done }) {
-            selectedFocusTaskId = taskId
+
+        let availableTasks = Dictionary(uniqueKeysWithValues: tasks.filter { !$0.done }.map { ($0.id, $0) })
+        timerRemainingByTask = (state.remainingByTask ?? [:]).reduce(into: [:]) { result, entry in
+            guard let task = availableTasks[entry.key] else { return }
+            result[entry.key] = min(task.estimate * 60, max(0, entry.value))
         }
 
-        if state.isRunning, let endDate = state.endDate {
+        guard let taskId = state.selectedTaskId, let selectedTask = availableTasks[taskId] else {
+            selectedFocusTaskId = nil
+            focusLabel = ""
+            timerTargetSeconds = 0
+            savedTimerSeconds = 0
+            timerIsRunning = false
+            timerEndDate = nil
+            cancelTimerNotification()
+            UserDefaults.standard.removeObject(forKey: TimerNotificationConstants.stopRequestStorageKey)
+            updateTicker()
+            persistTimerState()
+            return
+        }
+
+        selectedFocusTaskId = taskId
+        focusLabel = selectedTask.title
+        timerTargetSeconds = selectedTask.estimate * 60
+        let restoredRemaining = timerRemainingByTask[taskId] ?? state.remainingSeconds
+        savedTimerSeconds = min(timerTargetSeconds, max(0, restoredRemaining))
+        timerRemainingByTask[taskId] = savedTimerSeconds
+
+        if state.isRunning, !wasBlockedByOldRingingState, let endDate = state.endDate {
             let remaining = max(0, Int(ceil(endDate.timeIntervalSinceNow)))
             if remaining > 0 {
                 timerEndDate = endDate
                 savedTimerSeconds = min(remaining, timerTargetSeconds)
+                timerRemainingByTask[taskId] = savedTimerSeconds
                 timerIsRunning = true
             } else {
                 savedTimerSeconds = 0
-                UserDefaults.standard.removeObject(forKey: timerStorageKey)
-                finishFocus(mode: .timer, preserveCompletionNotification: true)
+                timerRemainingByTask[taskId] = 0
+                finishTimer(preserveCompletionNotification: true)
             }
         }
 
@@ -767,46 +585,15 @@ final class FlowtimeStore: ObservableObject {
             timerIsRunning = false
             timerEndDate = nil
             savedTimerSeconds = timerTargetSeconds
+            timerRemainingByTask[taskId] = savedTimerSeconds
             cancelTimerNotification()
         }
 
-
-        focusSeconds = savedTimerSeconds
-        refreshSelectedFocusState()
         updateTicker()
-        if wasBlockedByOldRingingState { persistTimerState() }
+        persistTimerState()
         if UserDefaults.standard.bool(forKey: TimerNotificationConstants.stopRequestStorageKey) {
             stopTimerAlarm()
         }
-    }
-
-    private func persistStopwatchState() {
-        let state = PersistedStopwatchState(
-            accumulatedTime: stopwatchAccumulatedTime,
-            startDate: stopwatchStartDate,
-            isRunning: stopwatchIsRunning,
-            laps: stopwatchLaps
-        )
-        guard let data = try? JSONEncoder().encode(state) else { return }
-        UserDefaults.standard.set(data, forKey: stopwatchStorageKey)
-    }
-
-    private func restoreStopwatchState() {
-        guard let data = UserDefaults.standard.data(forKey: stopwatchStorageKey),
-              let state = try? JSONDecoder().decode(PersistedStopwatchState.self, from: data) else { return }
-
-        stopwatchAccumulatedTime = max(0, state.accumulatedTime)
-        stopwatchLaps = state.laps
-            .filter { $0.duration >= 0 && $0.totalElapsed >= 0 }
-            .sorted { $0.number < $1.number }
-        if state.isRunning, let startDate = state.startDate {
-            stopwatchStartDate = min(startDate, Date())
-            stopwatchIsRunning = true
-        } else {
-            stopwatchStartDate = nil
-            stopwatchIsRunning = false
-        }
-        refreshSelectedFocusState()
     }
 
     private func scheduleTimerNotification() {
@@ -831,9 +618,9 @@ final class FlowtimeStore: ObservableObject {
             let content = UNMutableNotificationContent()
             content.title = title
             content.body = "Time’s up"
-            content.sound = selectedAlert == .defaultSound
-                ? UNNotificationSound(named: UNNotificationSoundName(TimerAlarmSound.fileName))
-                : nil
+            if let fileName = selectedAlert.soundFileName {
+                content.sound = UNNotificationSound(named: UNNotificationSoundName(fileName))
+            }
             content.categoryIdentifier = TimerNotificationConstants.categoryIdentifier
             content.threadIdentifier = TimerNotificationConstants.requestIdentifierPrefix
 
@@ -859,11 +646,6 @@ final class FlowtimeStore: ObservableObject {
     private func persistTasks() {
         guard let data = try? JSONEncoder().encode(tasks) else { return }
         UserDefaults.standard.set(data, forKey: taskStorageKey)
-    }
-
-    private func persistTaskLists() {
-        guard let data = try? JSONEncoder().encode(taskLists) else { return }
-        UserDefaults.standard.set(data, forKey: taskListStorageKey)
     }
 
     private func persistEvents() {

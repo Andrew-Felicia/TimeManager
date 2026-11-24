@@ -2,9 +2,23 @@ import SwiftUI
 import Charts
 import UIKit
 import UserNotifications
+import AVFoundation
+
+private enum AppTheme: String, CaseIterable, Identifiable {
+    case light = "Light"
+    case dark = "Dark"
+
+    var id: String { rawValue }
+    var colorScheme: ColorScheme { self == .light ? .light : .dark }
+}
 
 struct ContentView: View {
     @State private var selectedTab = 0
+    @AppStorage("flowtime.appearance") private var appearance = AppTheme.dark.rawValue
+
+    private var appTheme: AppTheme {
+        AppTheme(rawValue: appearance) ?? .dark
+    }
 
     var body: some View {
         TabView(selection: $selectedTab) {
@@ -21,10 +35,10 @@ struct ContentView: View {
                 .tabItem { Label("Insights", systemImage: "chart.bar") }
                 .tag(3)
         }
-        .toolbarBackground(.black, for: .tabBar)
+        .toolbarBackground(Color(.systemBackground), for: .tabBar)
         .toolbarBackground(.visible, for: .tabBar)
-        .background(Color.black.ignoresSafeArea())
-        .preferredColorScheme(.dark)
+        .background(Color(.systemBackground).ignoresSafeArea())
+        .preferredColorScheme(appTheme.colorScheme)
     }
 }
 
@@ -671,7 +685,7 @@ private struct CategoryManagerSheet: View {
                 } header: {
                     Text("Categories")
                 } footer: {
-                    Text("Swipe left to delete. Existing events and tasks will be moved to another category.")
+                    Text("Swipe left to delete. Existing events will be moved to another category.")
                 }
             }
             .navigationTitle("Categories")
@@ -690,182 +704,166 @@ private struct CategoryManagerSheet: View {
 }
 
 private struct TaskCell: View {
-    @EnvironmentObject private var store: FlowtimeStore
     let task: FlowTask
+    let onToggle: () -> Void
+    let onEdit: () -> Void
 
     var body: some View {
-        HStack(spacing: 12) {
-            Button { store.toggle(task) } label: {
+        HStack(spacing: 10) {
+            Button(action: onToggle) {
                 Image(systemName: task.done ? "checkmark.circle.fill" : "circle")
-                    .font(.title3)
-                    .foregroundStyle(task.done ? Color.green : Color.secondary)
-                    .frame(width: 32, height: 32)
+                    .font(.system(size: 24, weight: .regular))
+                    .foregroundStyle(task.done ? Color.accentColor : Color.secondary)
+                    .frame(width: 44, height: 44)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .accessibilityLabel(task.done ? "Mark \(task.title) incomplete" : "Complete \(task.title)")
 
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 5) {
                 Text(task.title)
+                    .font(.body)
                     .strikethrough(task.done)
-                    .foregroundStyle(task.done ? .secondary : .primary)
-                HStack(spacing: 8) {
-                    Label("\(task.estimate)m", systemImage: "timer")
-                    if let scheduledAt = task.scheduledAt {
-                        Label(scheduledAt.formatted(date: .abbreviated, time: .shortened), systemImage: "calendar")
-                    }
-                    if !task.subtasks.isEmpty {
-                        Label("\(task.subtasks.filter(\.done).count)/\(task.subtasks.count)", systemImage: "checklist")
-                    }
-                }
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-            }
-            Spacer()
-            if task.deadline != nil {
-                Image(systemName: "flag.fill")
-                    .font(.caption)
-                    .foregroundStyle(isOverdue ? Color.red : Color.orange)
-            }
-            Image(systemName: "chevron.right")
-                .font(.caption.bold())
-                .foregroundStyle(.tertiary)
-        }
-        .padding(.vertical, 9)
-        .contentShape(Rectangle())
-    }
+                    .foregroundStyle(task.done ? Color.secondary : Color.primary)
+                    .multilineTextAlignment(.leading)
 
-    private var isOverdue: Bool {
-        guard let deadline = task.deadline, !task.done else { return false }
-        return deadline < Calendar.current.startOfDay(for: Date())
+                Label(formattedTaskEstimate(task.estimate), systemImage: "clock")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+            .contentShape(Rectangle())
+            .onTapGesture(perform: onEdit)
+            .accessibilityAddTraits(.isButton)
+            .accessibilityHint("Edit task")
+        }
+        .padding(.vertical, 5)
+        .contentShape(Rectangle())
     }
 }
 
 private struct TaskEditorTarget: Identifiable {
     let id = UUID()
     let task: FlowTask?
-    let listId: String
 }
 
 private struct TaskListView: View {
     @EnvironmentObject private var store: FlowtimeStore
-    @State private var selectedListId: String? = "inbox"
     @State private var editorTarget: TaskEditorTarget?
-    @State private var showingListManager = false
+    @State private var showingCompleted = false
+    @State private var feedbackTrigger = 0
 
-    private var visibleTasks: [FlowTask] {
-        store.tasks
-            .filter { selectedListId == nil || $0.listId == selectedListId }
-            .sorted {
-                if $0.done != $1.done { return !$0.done }
-                return ($0.scheduledAt ?? .distantFuture) < ($1.scheduledAt ?? .distantFuture)
-            }
+    private var openTasks: [FlowTask] {
+        store.tasks.filter { !$0.done }
     }
 
-    private var selectedListName: String {
-        guard let selectedListId else { return "All tasks" }
-        return store.taskLists.first(where: { $0.id == selectedListId })?.name ?? "Tasks"
+    private var completedTasks: [FlowTask] {
+        store.tasks.filter(\.done)
     }
 
     var body: some View {
         NavigationStack {
-            VStack(spacing: 0) {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 8) {
-                        TaskListChip(title: "All", count: store.tasks.count, selected: selectedListId == nil) {
-                            selectedListId = nil
-                        }
-                        ForEach(store.taskLists) { list in
-                            TaskListChip(
-                                title: list.name,
-                                count: store.tasks.filter { $0.listId == list.id }.count,
-                                selected: selectedListId == list.id
-                            ) { selectedListId = list.id }
-                        }
-                        Button { showingListManager = true } label: {
-                            Image(systemName: "plus").frame(width: 34, height: 34)
-                        }
-                        .buttonStyle(.bordered)
-                        .accessibilityLabel("Manage task lists")
-                    }
-                    .padding(.horizontal)
-                }
-                .padding(.vertical, 10)
-
-                if visibleTasks.isEmpty {
+            Group {
+                if openTasks.isEmpty && !(showingCompleted && !completedTasks.isEmpty) {
                     ContentUnavailableView(
-                        "No tasks in \(selectedListName)",
-                        systemImage: "checklist",
-                        description: Text("Create a task, then add details, dates, and subtasks.")
+                        completedTasks.isEmpty ? "No Tasks" : "All Done",
+                        systemImage: completedTasks.isEmpty ? "checklist" : "checkmark.circle",
+                        description: Text(completedTasks.isEmpty
+                            ? "Add something you plan to do and estimate how long it will take."
+                            : "You completed everything on your list.")
                     )
-                    .frame(maxHeight: .infinity)
                 } else {
                     List {
-                        ForEach(visibleTasks) { task in
-                            TaskCell(task: task)
-                                .onTapGesture {
-                                    editorTarget = TaskEditorTarget(task: task, listId: task.listId)
+                        ForEach(openTasks) { task in
+                            taskRow(task)
+                        }
+
+                        if showingCompleted, !completedTasks.isEmpty {
+                            Section("Completed") {
+                                ForEach(completedTasks) { task in
+                                    taskRow(task)
                                 }
-                                .swipeActions(edge: .trailing) {
-                                    Button(role: .destructive) { store.delete(task) } label: {
-                                        Label("Delete", systemImage: "trash")
-                                    }
-                                }
-                                .swipeActions(edge: .leading) {
-                                    Button { store.toggle(task) } label: {
-                                        Label(task.done ? "Reopen" : "Complete", systemImage: task.done ? "arrow.uturn.backward" : "checkmark")
-                                    }
-                                    .tint(.green)
-                                }
+                            }
                         }
                     }
-                    .listStyle(.insetGrouped)
+                    .listStyle(.plain)
+                    .scrollContentBackground(.hidden)
+                    .background(Color(.systemBackground))
                 }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color(.systemBackground))
             .navigationTitle("Tasks")
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Menu {
-                        Button("New task", systemImage: "checkmark.circle") {
-                            editorTarget = TaskEditorTarget(task: nil, listId: selectedListId ?? store.taskLists.first?.id ?? "inbox")
+                    if !completedTasks.isEmpty {
+                        Menu {
+                            Button(showingCompleted ? "Hide Completed" : "Show Completed",
+                                   systemImage: showingCompleted ? "eye.slash" : "eye") {
+                                withAnimation { showingCompleted.toggle() }
+                            }
+                        } label: {
+                            Image(systemName: "ellipsis.circle")
                         }
-                        Button("Manage lists", systemImage: "list.bullet.rectangle") { showingListManager = true }
-                    } label: {
-                        Image(systemName: "plus")
+                        .accessibilityLabel("Task options")
                     }
-                    .accessibilityLabel("Create task or list")
                 }
             }
-            .sheet(item: $editorTarget) { target in
-                TaskEditorSheet(task: target.task, defaultListId: target.listId)
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                HStack {
+                    Button {
+                        editorTarget = TaskEditorTarget(task: nil)
+                    } label: {
+                        Label("New Task", systemImage: "plus.circle.fill")
+                            .font(.headline)
+                    }
+                    .accessibilityHint("Add a task and estimated time")
+                    Spacer()
+                }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 12)
+                .background(.ultraThinMaterial)
             }
-            .sheet(isPresented: $showingListManager) { TaskListManagerSheet() }
+            .sheet(item: $editorTarget) { target in
+                TaskEditorSheet(task: target.task)
+                    .presentationDetents([.medium, .large])
+                    .presentationDragIndicator(.visible)
+            }
+            .sensoryFeedback(.selection, trigger: feedbackTrigger)
         }
     }
-}
 
-private struct TaskListChip: View {
-    let title: String
-    let count: Int
-    let selected: Bool
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 6) {
-                Text(title)
-                Text("\(count)")
-                    .font(.caption2.bold())
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(selected ? Color.white.opacity(0.2) : Color.secondary.opacity(0.12))
-                    .clipShape(Capsule())
+    private func taskRow(_ task: FlowTask) -> some View {
+        TaskCell(
+            task: task,
+            onToggle: {
+                withAnimation {
+                    store.toggle(task)
+                    feedbackTrigger += 1
+                }
+            },
+            onEdit: { editorTarget = TaskEditorTarget(task: task) }
+        )
+        .listRowBackground(Color(.systemBackground))
+        .swipeActions(edge: .trailing) {
+            Button(role: .destructive) {
+                withAnimation { store.delete(task) }
+            } label: {
+                Label("Delete", systemImage: "trash")
             }
         }
-        .buttonStyle(.borderedProminent)
-        .tint(selected ? Color.accentColor : Color.secondary.opacity(0.18))
-        .foregroundStyle(selected ? .white : .primary)
+        .swipeActions(edge: .leading) {
+            Button {
+                withAnimation {
+                    store.toggle(task)
+                    feedbackTrigger += 1
+                }
+            } label: {
+                Label(task.done ? "Reopen" : "Complete",
+                      systemImage: task.done ? "arrow.uturn.backward" : "checkmark")
+            }
+            .tint(Color.accentColor)
+        }
     }
 }
 
@@ -874,101 +872,73 @@ private struct TaskEditorSheet: View {
     @Environment(\.dismiss) private var dismiss
     let task: FlowTask?
     @State private var title: String
-    @State private var details: String
-    @State private var estimateText: String
-    @State private var listId: String
-    @State private var hasDeadline: Bool
-    @State private var deadline: Date
-    @State private var hasSchedule: Bool
-    @State private var scheduledAt: Date
-    @State private var subtasks: [FlowSubtask]
-    @State private var newSubtask = ""
+    @State private var estimateMinutes: Int
     @FocusState private var titleFocused: Bool
+    private let presets = [5, 15, 20, 25, 30, 60, 120]
 
-    init(task: FlowTask?, defaultListId: String) {
+    init(task: FlowTask?) {
         self.task = task
         _title = State(initialValue: task?.title ?? "")
-        _details = State(initialValue: task?.details ?? "")
-        _estimateText = State(initialValue: task.map { String($0.estimate) } ?? "")
-        _listId = State(initialValue: task?.listId ?? defaultListId)
-        _hasDeadline = State(initialValue: task?.deadline != nil)
-        _deadline = State(initialValue: task?.deadline ?? Calendar.current.date(byAdding: .day, value: 1, to: Date()) ?? Date())
-        _hasSchedule = State(initialValue: task?.scheduledAt != nil)
-        _scheduledAt = State(initialValue: task?.scheduledAt ?? Date())
-        _subtasks = State(initialValue: task?.subtasks ?? [])
+        let initialEstimate = task?.estimate ?? 25
+        _estimateMinutes = State(initialValue: min(1_439, max(1, initialEstimate)))
     }
 
     var body: some View {
         NavigationStack {
             Form {
-                Section("Task") {
-                    TextField("What needs doing?", text: $title)
+                Section {
+                    TextField("What do you plan to do?", text: $title, axis: .vertical)
+                        .lineLimit(1...3)
+                        .font(.title3)
                         .focused($titleFocused)
-                    TextEditor(text: $details)
-                        .frame(minHeight: 90)
-                        .overlay(alignment: .topLeading) {
-                            if details.isEmpty {
-                                Text("Add details")
-                                    .foregroundStyle(.tertiary)
-                                    .padding(.top, 8)
-                                    .padding(.leading, 5)
-                                    .allowsHitTesting(false)
+                }
+
+                Section("Estimated time") {
+                    HStack(spacing: 0) {
+                        Picker("Hours", selection: estimateHours) {
+                            ForEach(0...23, id: \.self) { value in
+                                Text("\(value)").tag(value)
                             }
                         }
-                }
-                Section("Organize") {
-                    Picker("Task list", selection: $listId) {
-                        ForEach(store.taskLists) { list in Text(list.name).tag(list.id) }
-                    }
-                    HStack {
-                        TextField("Estimated time", text: $estimateText)
-                            .keyboardType(.numberPad)
-                        Text("minutes")
+                        .pickerStyle(.wheel)
+                        .frame(maxWidth: .infinity)
+                        .clipped()
+
+                        Text("hr")
+                            .foregroundStyle(.secondary)
+
+                        Picker("Minutes", selection: estimateMinutePart) {
+                            ForEach(0...59, id: \.self) { value in
+                                Text(String(format: "%02d", value)).tag(value)
+                            }
+                        }
+                        .pickerStyle(.wheel)
+                        .frame(maxWidth: .infinity)
+                        .clipped()
+
+                        Text("min")
                             .foregroundStyle(.secondary)
                     }
-                    HStack(spacing: 8) {
-                        ForEach([15, 25, 50, 90], id: \.self) { minutes in
-                            Button("\(minutes)m") { estimateText = String(minutes) }
-                                .buttonStyle(.bordered)
-                        }
-                    }
-                    Text("Required · between 1 minute and 8 hours")
-                        .font(.caption)
-                        .foregroundStyle(estimateMinutes == nil ? Color.red : Color.secondary)
-                }
-                Section("Dates") {
-                    Toggle("Add deadline", isOn: $hasDeadline.animation())
-                    if hasDeadline {
-                        DatePicker("Deadline", selection: $deadline, displayedComponents: .date)
-                    }
-                    Toggle("Add date and time", isOn: $hasSchedule.animation())
-                    if hasSchedule {
-                        DatePicker("Scheduled", selection: $scheduledAt, displayedComponents: [.date, .hourAndMinute])
-                    }
-                }
-                Section("Subtasks") {
-                    ForEach($subtasks) { $subtask in
-                        HStack {
-                            Button { subtask.done.toggle() } label: {
-                                Image(systemName: subtask.done ? "checkmark.circle.fill" : "circle")
-                                    .foregroundStyle(subtask.done ? Color.green : Color.secondary)
+                    .frame(height: 150)
+
+                    LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 4), spacing: 8) {
+                        ForEach(presets, id: \.self) { minutes in
+                            Button {
+                                estimateMinutes = minutes
+                            } label: {
+                                Text(minutes >= 60 ? "\(minutes / 60)h" : "\(minutes)m")
+                                    .frame(maxWidth: .infinity)
+                                    .lineLimit(1)
                             }
-                            .buttonStyle(.plain)
-                            TextField("Subtask", text: $subtask.title)
-                                .strikethrough(subtask.done)
+                            .buttonStyle(.borderedProminent)
+                            .buttonBorderShape(.capsule)
+                            .tint(estimateMinutes == minutes ? Color.accentColor : Color.secondary.opacity(0.25))
                         }
-                    }
-                    .onDelete { subtasks.remove(atOffsets: $0) }
-                    HStack {
-                        TextField("Add a subtask", text: $newSubtask)
-                            .submitLabel(.done)
-                            .onSubmit(addSubtask)
-                        Button("Add", action: addSubtask)
-                            .disabled(newSubtask.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     }
                 }
             }
-            .navigationTitle(task == nil ? "New task" : "Edit task")
+            .sensoryFeedback(.selection, trigger: estimateMinutes)
+            .navigationTitle(task == nil ? "New Task" : "Edit Task")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -976,737 +946,324 @@ private struct TaskEditorSheet: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button(task == nil ? "Add" : "Save", action: save)
-                        .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || estimateMinutes == nil)
+                        .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }
-            .onAppear {
-                if !store.taskLists.contains(where: { $0.id == listId }) { listId = store.taskLists.first?.id ?? "inbox" }
-                titleFocused = true
-            }
+            .onAppear { titleFocused = true }
         }
+    }
+
+    private var estimateHours: Binding<Int> {
+        Binding(
+            get: { estimateMinutes / 60 },
+            set: { hours in
+                estimateMinutes = min(1_439, max(1, hours * 60 + estimateMinutes % 60))
+            }
+        )
+    }
+
+    private var estimateMinutePart: Binding<Int> {
+        Binding(
+            get: { estimateMinutes % 60 },
+            set: { minutes in
+                estimateMinutes = min(1_439, max(1, (estimateMinutes / 60) * 60 + minutes))
+            }
+        )
     }
 
     private func save() {
-        guard !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              let estimate = estimateMinutes else { return }
+        guard !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         if var updated = task {
             updated.title = title
-            updated.details = details
-            updated.estimate = estimate
-            updated.listId = listId
-            updated.deadline = hasDeadline ? deadline : nil
-            updated.scheduledAt = hasSchedule ? scheduledAt : nil
-            updated.subtasks = subtasks
+            updated.estimate = estimateMinutes
             store.updateTask(updated)
         } else {
-            store.addTask(
-                title: title,
-                listId: listId,
-                details: details,
-                estimate: estimate,
-                deadline: hasDeadline ? deadline : nil,
-                scheduledAt: hasSchedule ? scheduledAt : nil,
-                subtasks: subtasks
-            )
+            store.addTask(title: title, estimate: estimateMinutes)
         }
         dismiss()
     }
-
-    private var estimateMinutes: Int? {
-        guard let value = Int(estimateText.trimmingCharacters(in: .whitespacesAndNewlines)),
-              (1...480).contains(value) else { return nil }
-        return value
-    }
-
-    private func addSubtask() {
-        let cleanTitle = newSubtask.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !cleanTitle.isEmpty else { return }
-        subtasks.append(FlowSubtask(id: UUID().uuidString, title: cleanTitle, done: false))
-        newSubtask = ""
-    }
 }
 
-private struct TaskListManagerSheet: View {
-    @EnvironmentObject private var store: FlowtimeStore
-    @Environment(\.dismiss) private var dismiss
-    @State private var newListName = ""
-
-    var body: some View {
-        NavigationStack {
-            Form {
-                Section("New list") {
-                    HStack {
-                        TextField("List name", text: $newListName)
-                            .submitLabel(.done)
-                            .onSubmit(addList)
-                        Button("Add", action: addList)
-                            .disabled(newListName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    }
-                }
-                Section {
-                    ForEach(store.taskLists) { list in
-                        HStack {
-                            Label(list.name, systemImage: list.id == "inbox" ? "tray" : "list.bullet")
-                            Spacer()
-                            Text("\(store.tasks.filter { $0.listId == list.id }.count)")
-                                .foregroundStyle(.secondary)
-                        }
-                        .swipeActions {
-                            if list.id != "inbox" {
-                                Button(role: .destructive) { store.deleteTaskList(list) } label: {
-                                    Label("Delete", systemImage: "trash")
-                                }
-                            }
-                        }
-                    }
-                } header: {
-                    Text("Your lists")
-                } footer: {
-                    Text("Deleting a list moves its tasks to Inbox.")
-                }
-            }
-            .navigationTitle("Task lists")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
-            }
-        }
-    }
-
-    private func addList() {
-        _ = store.addTaskList(newListName)
-        newListName = ""
-    }
+private func formattedTaskEstimate(_ minutes: Int) -> String {
+    let safeMinutes = max(0, minutes)
+    let hours = safeMinutes / 60
+    let remainingMinutes = safeMinutes % 60
+    if hours == 0 { return "\(remainingMinutes) min" }
+    if remainingMinutes == 0 { return hours == 1 ? "1 hr" : "\(hours) hr" }
+    return "\(hours) hr \(remainingMinutes) min"
 }
 
 private struct FocusView: View {
-    @EnvironmentObject private var store: FlowtimeStore
-
     var body: some View {
         NavigationStack {
-            ZStack {
-                Color.black.ignoresSafeArea()
-                VStack(spacing: 0) {
-                    Picker("Focus mode", selection: Binding(
-                        get: { store.focusMode },
-                        set: { store.setFocusMode($0) }
-                    )) {
-                        ForEach(FocusMode.allCases) { mode in Text(mode.rawValue).tag(mode) }
-                    }
-                    .pickerStyle(.segmented)
-                    .padding(.horizontal)
-                    .padding(.top, 8)
-                    .padding(.bottom, 6)
-
-                    if store.focusMode == .timer {
-                        ScrollView {
-                            ClockTimerView()
-                                .padding(.vertical, 16)
-                        }
-                    } else {
-                        ClockStopwatchView()
-                    }
-                }
-            }
-            .navigationTitle(store.focusMode == .timer ? "Timers" : "Stopwatch")
-            .toolbarBackground(.black, for: .navigationBar)
-            .toolbarColorScheme(.dark, for: .navigationBar)
+            ClockTimerView()
+                .background(Color(.systemGroupedBackground).ignoresSafeArea())
+                .navigationTitle("Timers")
+                .toolbarBackground(Color(.systemBackground), for: .navigationBar)
         }
-        .environment(\.colorScheme, .dark)
     }
 }
 
-private struct ClockStopwatchView: View {
+private struct ClockTimerView: View {
     @EnvironmentObject private var store: FlowtimeStore
-    @AppStorage("flowtime.stopwatch.selected-face") private var selectedFace = 0
     @State private var feedbackTrigger = 0
 
-    var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: !store.stopwatchIsRunning)) { context in
-            GeometryReader { geometry in
-                VStack(spacing: 0) {
-                    TabView(selection: $selectedFace) {
-                        StopwatchDigitalFace(elapsed: store.stopwatchElapsed(at: context.date))
-                            .tag(0)
-                        StopwatchAnalogFace(elapsed: store.stopwatchElapsed(at: context.date))
-                            .tag(1)
-                    }
-                    .tabViewStyle(.page(indexDisplayMode: .never))
-                    .frame(height: min(300, max(238, geometry.size.height * 0.46)))
+    private var availableTasks: [FlowTask] {
+        store.tasks.filter { !$0.done }
+    }
 
-                    HStack(spacing: 7) {
-                        ForEach(0..<2, id: \.self) { page in
-                            Circle()
-                                .fill(page == selectedFace ? Color.white : Color.white.opacity(0.3))
-                                .frame(width: 6, height: 6)
+    var body: some View {
+        VStack(spacing: 0) {
+            if availableTasks.isEmpty {
+                ContentUnavailableView(
+                    "No Task Timers",
+                    systemImage: "timer",
+                    description: Text("Add a task in Tasks and it will appear here with its estimated time.")
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 12) {
+                        ForEach(availableTasks) { task in
+                            TaskTimerCard(
+                                task: task,
+                                remainingSeconds: store.timerRemainingSeconds(for: task),
+                                isRunning: store.timerIsRunning(for: task),
+                                isSelected: store.selectedFocusTaskId == task.id,
+                                hasStarted: store.timerHasStarted(for: task),
+                                onToggle: {
+                                    store.toggleTimer(for: task)
+                                    feedbackTrigger += 1
+                                },
+                                onReset: {
+                                    store.resetTimer(for: task)
+                                    feedbackTrigger += 1
+                                }
+                            )
                         }
                     }
-                    .frame(height: 20)
-                    .accessibilityHidden(true)
-
-                    stopwatchControls
-                        .padding(.horizontal, 20)
-                        .padding(.vertical, 9)
-
-                    Divider()
-                        .overlay(Color.white.opacity(0.18))
-
-                    lapList(at: context.date)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
                 }
+                .scrollIndicators(.hidden)
             }
         }
         .sensoryFeedback(.selection, trigger: feedbackTrigger)
     }
-
-    private var stopwatchControls: some View {
-        HStack {
-            StopwatchControlButton(
-                title: leftControlTitle,
-                role: .neutral,
-                isEnabled: store.stopwatchIsRunning || store.stopwatchHasStarted
-            ) {
-                if store.stopwatchIsRunning {
-                    store.recordStopwatchLap()
-                } else {
-                    store.resetStopwatch()
-                }
-                feedbackTrigger += 1
-            }
-
-            Spacer()
-
-            StopwatchControlButton(
-                title: store.stopwatchIsRunning ? "Stop" : "Start",
-                role: store.stopwatchIsRunning ? .stop : .start,
-                isEnabled: true
-            ) {
-                store.toggleStopwatch()
-                feedbackTrigger += 1
-            }
-        }
-    }
-
-    private var leftControlTitle: String {
-        !store.stopwatchIsRunning && store.stopwatchHasStarted ? "Reset" : "Lap"
-    }
-
-    private func lapList(at date: Date) -> some View {
-        ScrollView {
-            LazyVStack(spacing: 0) {
-                if store.stopwatchHasStarted {
-                    StopwatchLapRow(
-                        number: store.stopwatchLaps.count + 1,
-                        duration: store.stopwatchCurrentLapElapsed(at: date),
-                        color: .white
-                    )
-
-                    ForEach(Array(store.stopwatchLaps.reversed())) { lap in
-                        StopwatchLapRow(
-                            number: lap.number,
-                            duration: lap.duration,
-                            color: color(for: lap)
-                        )
-                    }
-                }
-            }
-        }
-        .scrollIndicators(.hidden)
-    }
-
-    private func color(for lap: StopwatchLap) -> Color {
-        guard store.stopwatchLaps.count > 1,
-              let fastest = store.stopwatchLaps.min(by: { $0.duration < $1.duration }),
-              let slowest = store.stopwatchLaps.max(by: { $0.duration < $1.duration }),
-              abs(fastest.duration - slowest.duration) > 0.000_5 else { return .white }
-        if lap.id == fastest.id { return .green }
-        if lap.id == slowest.id { return .red }
-        return .white
-    }
 }
 
-private struct StopwatchDigitalFace: View {
-    let elapsed: TimeInterval
+private struct TaskTimerCard: View {
+    let task: FlowTask
+    let remainingSeconds: Int
+    let isRunning: Bool
+    let isSelected: Bool
+    let hasStarted: Bool
+    let onToggle: () -> Void
+    let onReset: () -> Void
+
+    private var targetSeconds: Int {
+        task.estimate * 60
+    }
+
+    private var elapsedProgress: Double {
+        guard targetSeconds > 0 else { return 0 }
+        return min(1, max(0, Double(targetSeconds - remainingSeconds) / Double(targetSeconds)))
+    }
 
     var body: some View {
-        Text(stopwatchTime(elapsed))
-            .font(.system(size: elapsed >= 3_600 ? 52 : 72, weight: .thin, design: .default))
-            .monospacedDigit()
-            .foregroundStyle(.white)
-            .minimumScaleFactor(0.62)
-            .lineLimit(1)
-            .padding(.horizontal, 12)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .accessibilityLabel("Elapsed time \(stopwatchSpokenTime(elapsed))")
-    }
-}
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(task.title)
+                    .font(.headline)
+                    .lineLimit(2)
+                Spacer(minLength: 12)
+                Text(formattedTaskEstimate(task.estimate))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
 
-private struct StopwatchAnalogFace: View {
-    let elapsed: TimeInterval
+            HStack(spacing: 10) {
+                Text(timerClockTime(remainingSeconds))
+                    .font(.system(size: remainingSeconds >= 3_600 ? 36 : 42, weight: .light, design: .rounded))
+                    .monospacedDigit()
+                    .minimumScaleFactor(0.7)
+                    .lineLimit(1)
 
-    var body: some View {
-        StopwatchAnalogDial(elapsed: elapsed)
-            .padding(.vertical, 6)
-            .accessibilityLabel("Analog stopwatch, elapsed time \(stopwatchSpokenTime(elapsed))")
-    }
-}
+                Spacer(minLength: 8)
 
-private struct StopwatchAnalogDial: View {
-    let elapsed: TimeInterval
-    private let labels = [60, 10, 20, 30, 40, 50]
-
-    var body: some View {
-        GeometryReader { proxy in
-            let diameter = min(proxy.size.width, proxy.size.height)
-            let radius = diameter / 2
-            let center = CGPoint(x: diameter / 2, y: diameter / 2)
-
-            ZStack {
-                Circle()
-                    .stroke(Color.white.opacity(0.88), lineWidth: 1.5)
-
-                ForEach(0..<60, id: \.self) { tick in
-                    Capsule()
-                        .fill(Color.white.opacity(tick.isMultiple(of: 5) ? 0.95 : 0.55))
-                        .frame(width: tick.isMultiple(of: 5) ? 2 : 1, height: tick.isMultiple(of: 5) ? 11 : 6)
-                        .offset(y: -radius + 10)
-                        .rotationEffect(.degrees(Double(tick) * 6))
+                if hasStarted {
+                    TimerCardButton(title: "Reset", color: .gray, action: onReset)
                 }
 
-                ForEach(labels, id: \.self) { value in
-                    let angle = Angle.degrees(Double(value == 60 ? 0 : value) * 6 - 90)
-                    Text("\(value)")
-                        .font(.system(size: 11, weight: .medium, design: .rounded))
-                        .monospacedDigit()
-                        .foregroundStyle(.white.opacity(0.9))
-                        .position(
-                            x: center.x + cos(angle.radians) * (radius - 27),
-                            y: center.y + sin(angle.radians) * (radius - 27)
-                        )
-                }
-
-                minuteSubdial
-                    .frame(width: diameter * 0.25, height: diameter * 0.25)
-                    .offset(y: -diameter * 0.2)
-
-                Capsule()
-                    .fill(Color.orange)
-                    .frame(width: 2.5, height: radius - 23)
-                    .offset(y: -(radius - 23) / 2)
-                    .rotationEffect(.degrees(elapsed.truncatingRemainder(dividingBy: 60) * 6))
-
-                Circle()
-                    .fill(Color.orange)
-                    .frame(width: 9, height: 9)
-                Circle()
-                    .fill(Color.black)
-                    .frame(width: 3, height: 3)
+                TimerCardButton(
+                    title: isRunning ? "Stop" : (hasStarted ? "Resume" : "Start"),
+                    color: isRunning ? .orange : .green,
+                    action: onToggle
+                )
             }
-            .frame(width: diameter, height: diameter)
-            .position(x: proxy.size.width / 2, y: proxy.size.height / 2)
-        }
-        .aspectRatio(1, contentMode: .fit)
-    }
 
-    private var minuteSubdial: some View {
-        ZStack {
-            Circle()
-                .fill(Color.black)
-                .overlay(Circle().stroke(Color.white.opacity(0.7), lineWidth: 1))
-            ForEach(0..<12, id: \.self) { tick in
-                Capsule()
-                    .fill(Color.white.opacity(0.75))
-                    .frame(width: 1, height: tick.isMultiple(of: 3) ? 5 : 3)
-                    .offset(y: -25)
-                    .rotationEffect(.degrees(Double(tick) * 30))
+            if hasStarted {
+                ProgressView(value: elapsedProgress)
+                    .tint(isRunning ? .orange : Color.accentColor)
+                    .animation(.linear(duration: 0.25), value: elapsedProgress)
             }
-            Capsule()
-                .fill(Color.orange)
-                .frame(width: 1.5, height: 23)
-                .offset(y: -11.5)
-                .rotationEffect(.degrees(elapsed.truncatingRemainder(dividingBy: 1_800) / 1_800 * 360))
-            Circle()
-                .fill(Color.orange)
-                .frame(width: 5, height: 5)
         }
+        .padding(16)
+        .background(Color(.secondarySystemGroupedBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 16))
+        .overlay {
+            RoundedRectangle(cornerRadius: 16)
+                .stroke(isSelected ? (isRunning ? Color.orange : Color.accentColor) : Color.clear, lineWidth: 1)
+        }
+        .accessibilityElement(children: .contain)
     }
 }
 
-private enum StopwatchControlRole {
-    case neutral
-    case start
-    case stop
-}
-
-private struct StopwatchControlButton: View {
+private struct TimerCardButton: View {
     let title: String
-    let role: StopwatchControlRole
-    let isEnabled: Bool
+    let color: Color
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
             Text(title)
-                .font(.system(size: 17, weight: .regular))
-                .foregroundStyle(foregroundColor)
-                .frame(width: 78, height: 78)
-                .background(fillColor)
-                .clipShape(Circle())
-                .overlay {
-                    Circle()
-                        .stroke(Color.black, lineWidth: 2)
-                        .padding(3)
-                }
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(color)
+                .padding(.horizontal, 14)
+                .frame(minWidth: 64, minHeight: 44)
+                .background(color.opacity(0.16))
+                .clipShape(Capsule())
         }
         .buttonStyle(.plain)
-        .disabled(!isEnabled)
         .accessibilityLabel(title)
     }
+}
 
-    private var foregroundColor: Color {
-        guard isEnabled else { return Color.white.opacity(0.32) }
-        switch role {
-        case .neutral: return .white
-        case .start: return .green
-        case .stop: return .red
+private func timerClockTime(_ duration: Int) -> String {
+    let safeDuration = max(0, duration)
+    if safeDuration >= 3_600 {
+        return String(
+            format: "%d:%02d:%02d",
+            safeDuration / 3_600,
+            (safeDuration % 3_600) / 60,
+            safeDuration % 60
+        )
+    }
+    return String(format: "%02d:%02d", safeDuration / 60, safeDuration % 60)
+}
+
+@MainActor
+private final class TimerSoundPreviewPlayer: ObservableObject {
+    private var player: AVAudioPlayer?
+    private var stopWorkItem: DispatchWorkItem?
+
+    func play(_ alert: TimerEndAlert) {
+        stop()
+        guard let url = TimerAlarmSound.fileURL(for: alert) else { return }
+
+        do {
+            try AVAudioSession.sharedInstance().setCategory(.ambient, options: [.mixWithOthers])
+            player = try AVAudioPlayer(contentsOf: url)
+            player?.prepareToPlay()
+            player?.play()
+
+            let workItem = DispatchWorkItem { [weak self] in self?.stop() }
+            stopWorkItem = workItem
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: workItem)
+        } catch {
+            player = nil
         }
     }
 
-    private var fillColor: Color {
-        guard isEnabled else { return Color(white: 0.12) }
-        switch role {
-        case .neutral: return Color(white: 0.2)
-        case .start: return Color.green.opacity(0.2)
-        case .stop: return Color.red.opacity(0.2)
-        }
+    func stop() {
+        stopWorkItem?.cancel()
+        stopWorkItem = nil
+        player?.stop()
+        player = nil
     }
 }
 
-private struct StopwatchLapRow: View {
-    let number: Int
-    let duration: TimeInterval
-    let color: Color
-
-    var body: some View {
-        HStack {
-            Text("Lap \(number)")
-            Spacer()
-            Text(stopwatchTime(duration))
-                .monospacedDigit()
-        }
-        .font(.system(size: 17, weight: .regular))
-        .foregroundStyle(color)
-        .padding(.horizontal, 20)
-        .frame(height: 48)
-        .overlay(alignment: .bottom) {
-            Divider()
-                .overlay(Color.white.opacity(0.15))
-                .padding(.leading, 20)
-        }
-    }
-}
-
-private func stopwatchTime(_ interval: TimeInterval) -> String {
-    let hundredthsTotal = max(0, Int((interval * 100).rounded(.down)))
-    let hundredths = hundredthsTotal % 100
-    let totalSeconds = hundredthsTotal / 100
-    let seconds = totalSeconds % 60
-    let totalMinutes = totalSeconds / 60
-    if totalMinutes >= 60 {
-        return String(format: "%d:%02d:%02d.%02d", totalMinutes / 60, totalMinutes % 60, seconds, hundredths)
-    }
-    return String(format: "%02d:%02d.%02d", totalMinutes, seconds, hundredths)
-}
-
-private func stopwatchSpokenTime(_ interval: TimeInterval) -> String {
-    let totalSeconds = max(0, Int(interval.rounded(.down)))
-    let hours = totalSeconds / 3_600
-    let minutes = (totalSeconds % 3_600) / 60
-    let seconds = totalSeconds % 60
-    if hours > 0 { return "\(hours) hours, \(minutes) minutes, \(seconds) seconds" }
-    return "\(minutes) minutes, \(seconds) seconds"
-}
-
-private struct ClockTimerView: View {
-    @EnvironmentObject private var store: FlowtimeStore
-    @State private var hours = 0
-    @State private var minutes = 0
-    @State private var seconds = 0
-    @State private var pickerIsReady = false
-    @State private var showingTimerEndOptions = false
-    private let recentDurations = [1_500, 3_000, 5_400]
-
-    var body: some View {
-        VStack(spacing: 28) {
-            if timerIsActive {
-                activeTimerDisplay
-            } else {
-                HStack(spacing: 0) {
-                    timerWheel(title: "hours", selection: $hours, values: 0...23)
-                    timerWheel(title: "min", selection: $minutes, values: 0...59)
-                    timerWheel(title: "sec", selection: $seconds, values: 0...59)
-                }
-                .frame(height: 215)
-                .sensoryFeedback(.selection, trigger: hours)
-                .sensoryFeedback(.selection, trigger: minutes)
-                .sensoryFeedback(.selection, trigger: seconds)
-                .onChange(of: hours) { _, _ in updateDurationFromPicker() }
-                .onChange(of: minutes) { _, _ in updateDurationFromPicker() }
-                .onChange(of: seconds) { _, _ in updateDurationFromPicker() }
-            }
-
-            timerOptions
-            timerControls
-            recentTimers
-        }
-        .padding(.horizontal)
-        .onAppear {
-            loadPickerDuration(store.timerTargetSeconds)
-            pickerIsReady = true
-        }
-        .onChange(of: store.timerTargetSeconds) { _, newValue in
-            guard !timerIsActive else { return }
-            loadPickerDuration(newValue)
-        }
-        .sheet(isPresented: $showingTimerEndOptions) {
-            TimerEndOptionsSheet()
-        }
-    }
-
-    private var timerIsActive: Bool {
-        store.isFocusing || store.timerHasStarted
-    }
-
-    private var totalPickerSeconds: Int {
-        hours * 3_600 + minutes * 60 + seconds
-    }
-
-    private var activeTimerDisplay: some View {
-        ZStack {
-            Circle()
-                .stroke(Color.white.opacity(0.13), lineWidth: 8)
-            Circle()
-                .trim(from: 0, to: max(0.001, store.focusProgress))
-                .stroke(Color.orange, style: StrokeStyle(lineWidth: 8, lineCap: .round))
-                .rotationEffect(.degrees(-90))
-                .animation(.linear(duration: 0.25), value: store.focusProgress)
-
-            VStack(spacing: 7) {
-                Text(clockTime(store.displayedSeconds))
-                    .font(.system(size: store.displayedSeconds >= 3_600 ? 45 : 54, weight: .light, design: .rounded))
-                    .monospacedDigit()
-                    .minimumScaleFactor(0.7)
-                Text(store.focusLabel.isEmpty ? "Timer" : store.focusLabel)
-                    .font(.headline)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                Text(store.isFocusing ? "Ends \(expectedEndTime)" : "Paused")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-            }
-            .padding(28)
-        }
-        .frame(width: 285, height: 285)
-        .frame(maxWidth: .infinity)
-    }
-
-    private var timerOptions: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Text("Label")
-                TextField("Timer", text: Binding(
-                    get: { store.focusLabel },
-                    set: { store.setFocusLabel($0) }
-                ))
-                .multilineTextAlignment(.trailing)
-                .disabled(timerIsActive)
-            }
-            .padding(.horizontal, 16)
-            .frame(height: 52)
-
-            Divider().overlay(Color.white.opacity(0.12))
-
-            Button {
-                showingTimerEndOptions = true
-            } label: {
-                HStack {
-                    Text("When Timer Ends")
-                        .foregroundStyle(.primary)
-                    Spacer()
-                    Text(store.timerEndAlert.rawValue)
-                        .foregroundStyle(.secondary)
-                    Image(systemName: "chevron.right")
-                        .font(.caption.bold())
-                        .foregroundStyle(.tertiary)
-                }
-            }
-            .buttonStyle(.plain)
-            .padding(.horizontal, 16)
-            .frame(height: 52)
-        }
-        .background(Color(white: 0.11))
-        .clipShape(RoundedRectangle(cornerRadius: 11))
-    }
-
-    private var timerControls: some View {
-        HStack {
-            ClockControlButton(
-                title: "Cancel",
-                color: .gray,
-                isEnabled: timerIsActive
-            ) {
-                store.resetFocus()
-                loadPickerDuration(store.timerTargetSeconds)
-            }
-
-            Spacer()
-
-            ClockControlButton(
-                title: store.isFocusing ? "Pause" : (store.timerHasStarted ? "Resume" : "Start"),
-                color: timerIsActive ? .orange : .green,
-                isEnabled: timerIsActive || totalPickerSeconds > 0
-            ) {
-                if !timerIsActive {
-                    store.setTimerDuration(seconds: totalPickerSeconds)
-                }
-                store.toggleFocus()
-            }
-        }
-        .padding(.horizontal, 4)
-    }
-
-    private var recentTimers: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Recents")
-                .font(.title2.bold())
-
-            VStack(spacing: 0) {
-                ForEach(Array(recentDurations.enumerated()), id: \.element) { index, duration in
-                    Button {
-                        store.setTimerDuration(seconds: duration)
-                        loadPickerDuration(duration)
-                        store.toggleFocus()
-                    } label: {
-                        HStack {
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text(shortDuration(duration))
-                                    .font(.title3)
-                                    .foregroundStyle(.primary)
-                                Text("Focus")
-                                    .font(.subheadline)
-                                    .foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                            Image(systemName: "play.fill")
-                                .font(.headline)
-                                .foregroundStyle(.green)
-                                .frame(width: 38, height: 38)
-                                .background(Color.green.opacity(0.18))
-                                .clipShape(Circle())
-                        }
-                        .padding(.horizontal, 16)
-                        .frame(height: 66)
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(timerIsActive)
-
-                    if index < recentDurations.count - 1 {
-                        Divider().padding(.leading, 16)
-                    }
-                }
-            }
-            .background(Color(white: 0.11))
-            .clipShape(RoundedRectangle(cornerRadius: 11))
-        }
-    }
-
-    private var expectedEndTime: String {
-        (store.timerExpectedEndDate ?? Date().addingTimeInterval(TimeInterval(store.displayedSeconds)))
-            .formatted(date: .omitted, time: .shortened)
-    }
-
-    private func timerWheel(
-        title: String,
-        selection: Binding<Int>,
-        values: ClosedRange<Int>
-    ) -> some View {
-        Picker(title, selection: selection) {
-            ForEach(values, id: \.self) { value in
-                Text("\(value)")
-                    .font(.title2.monospacedDigit())
-                    .foregroundStyle(.white)
-                    .tag(value)
-            }
-        }
-        .pickerStyle(.wheel)
-        .frame(maxWidth: .infinity)
-        .overlay(alignment: .trailing) {
-            Text(title)
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .padding(.trailing, 4)
-                .allowsHitTesting(false)
-        }
-        .clipped()
-        .accessibilityLabel(title)
-    }
-
-    private func updateDurationFromPicker() {
-        guard pickerIsReady, !timerIsActive, totalPickerSeconds > 0 else { return }
-        store.setTimerDuration(seconds: totalPickerSeconds)
-    }
-
-    private func loadPickerDuration(_ duration: Int) {
-        let clamped = min(max(1, duration), 86_399)
-        hours = clamped / 3_600
-        minutes = (clamped % 3_600) / 60
-        seconds = clamped % 60
-    }
-
-    private func clockTime(_ duration: Int) -> String {
-        if duration >= 3_600 {
-            return String(format: "%d:%02d:%02d", duration / 3_600, (duration % 3_600) / 60, duration % 60)
-        }
-        return String(format: "%02d:%02d", duration / 60, duration % 60)
-    }
-
-    private func shortDuration(_ duration: Int) -> String {
-        let hours = duration / 3_600
-        let minutes = (duration % 3_600) / 60
-        if hours > 0 { return minutes > 0 ? "\(hours) hr \(minutes) min" : "\(hours) hr" }
-        return "\(minutes) min"
-    }
-}
-
-private struct TimerEndOptionsSheet: View {
+private struct SettingsView: View {
     @EnvironmentObject private var store: FlowtimeStore
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
+    @AppStorage("flowtime.appearance") private var appearance = AppTheme.dark.rawValue
+    @StateObject private var previewPlayer = TimerSoundPreviewPlayer()
     @State private var notificationStatus: UNAuthorizationStatus?
+
+    private var currentTheme: AppTheme {
+        AppTheme(rawValue: appearance) ?? .dark
+    }
+
+    private var themeSelection: Binding<AppTheme> {
+        Binding(
+            get: { currentTheme },
+            set: { appearance = $0.rawValue }
+        )
+    }
 
     var body: some View {
         NavigationStack {
-            List {
+            Form {
+                Section("Appearance") {
+                    Picker("Theme", selection: themeSelection) {
+                        ForEach(AppTheme.allCases) { theme in
+                            Text(theme.rawValue).tag(theme)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                }
+
                 Section {
-                    ForEach(TimerEndAlert.allCases) { option in
-                        Button {
-                            store.setTimerEndAlert(option)
-                        } label: {
-                            HStack {
-                                VStack(alignment: .leading, spacing: 3) {
-                                    Text(option.rawValue)
-                                        .foregroundStyle(.primary)
-                                    Text(option == .defaultSound ? "Long alarm sound and haptics" : "Notification without sound")
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
+                    ForEach(TimerEndAlert.allCases) { alert in
+                        HStack(spacing: 12) {
+                            Button {
+                                store.setTimerEndAlert(alert)
+                                if alert == .silent {
+                                    previewPlayer.stop()
+                                } else {
+                                    previewPlayer.play(alert)
                                 }
-                                Spacer()
-                                if store.timerEndAlert == option {
-                                    Image(systemName: "checkmark")
-                                        .foregroundStyle(.orange)
+                            } label: {
+                                HStack(spacing: 12) {
+                                    Image(systemName: soundIcon(for: alert))
+                                        .foregroundStyle(alert == .jetLock ? Color.orange : Color.accentColor)
+                                        .frame(width: 24)
+
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        Text(alert.displayName)
+                                            .foregroundStyle(.primary)
+                                        Text(alert.description)
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+
+                                    Spacer()
+
+                                    if store.timerEndAlert == alert {
+                                        Image(systemName: "checkmark")
+                                            .foregroundStyle(Color.accentColor)
+                                    }
                                 }
+                            }
+                            .buttonStyle(.plain)
+
+                            if alert.soundFileName != nil {
+                                Button {
+                                    previewPlayer.play(alert)
+                                } label: {
+                                    Image(systemName: "play.circle.fill")
+                                        .font(.title2)
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityLabel("Preview \(alert.displayName)")
                             }
                         }
                     }
+                } header: {
+                    Text("When Timer Ends")
+                } footer: {
+                    Text("Jet Lock is an original synthesized fighter-jet radar warning tone.")
                 }
 
                 Section {
@@ -1719,11 +1276,11 @@ private struct TimerEndOptionsSheet: View {
                     if notificationStatus == .denied {
                         Text("Notifications are disabled for Flowtime. Enable them to receive timer alerts while the app is closed or your iPhone is locked.")
                     } else {
-                        Text("To keep the banner on screen until you tap it, choose Banners and set Banner Style to Persistent in iPhone Settings.")
+                        Text("For a banner that stays until tapped, choose Banners and set Banner Style to Persistent.")
                     }
                 }
             }
-            .navigationTitle("When Timer Ends")
+            .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
@@ -1733,34 +1290,19 @@ private struct TimerEndOptionsSheet: View {
             .task {
                 notificationStatus = await UNUserNotificationCenter.current().notificationSettings().authorizationStatus
             }
+            .onDisappear { previewPlayer.stop() }
         }
-        .environment(\.colorScheme, .dark)
-        .presentationDetents([.medium])
+        .preferredColorScheme(currentTheme.colorScheme)
     }
-}
 
-private struct ClockControlButton: View {
-    let title: String
-    let color: Color
-    let isEnabled: Bool
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            Text(title)
-                .font(.body)
-                .foregroundStyle(isEnabled ? color : Color.secondary)
-                .frame(width: 76, height: 76)
-                .background((isEnabled ? color : Color.gray).opacity(isEnabled ? 0.18 : 0.1))
-                .clipShape(Circle())
-                .overlay {
-                    Circle()
-                        .stroke(Color.black, lineWidth: 2)
-                        .padding(3)
-                }
+    private func soundIcon(for alert: TimerEndAlert) -> String {
+        switch alert {
+        case .defaultSound: return "bell.fill"
+        case .chime: return "music.note"
+        case .pulse: return "waveform"
+        case .jetLock: return "airplane"
+        case .silent: return "speaker.slash.fill"
         }
-        .buttonStyle(.plain)
-        .disabled(!isEnabled)
     }
 }
 
@@ -1800,6 +1342,7 @@ private struct CategoryMetric: Identifiable {
 private struct InsightsView: View {
     @EnvironmentObject private var store: FlowtimeStore
     @State private var range: InsightRange = .week
+    @State private var showingSettings = false
     private let weeklyValues = [4.2, 5.5, 3.1, 6.4, 4.8, 2.2, 1.4]
     private let monthlyValues = [3.5, 4.7, 5.9, 4.1, 6.2, 3.8, 5.1]
     private let trendData = [
@@ -1934,6 +1477,19 @@ private struct InsightsView: View {
             }
             .background(Color(.systemGroupedBackground))
             .navigationTitle("Insights")
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        showingSettings = true
+                    } label: {
+                        Image(systemName: "gearshape.fill")
+                    }
+                    .accessibilityLabel("Settings")
+                }
+            }
+            .sheet(isPresented: $showingSettings) {
+                SettingsView()
+            }
         }
     }
 

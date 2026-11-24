@@ -3,42 +3,93 @@ import UIKit
 import UserNotifications
 
 enum TimerAlarmSound {
-    static let fileName = "flowtime-alarm.wav"
-
     static func installIfNeeded() {
+        guard let soundsURL else { return }
         let fileManager = FileManager.default
-        guard let libraryURL = fileManager.urls(for: .libraryDirectory, in: .userDomainMask).first else { return }
-        let soundsURL = libraryURL.appendingPathComponent("Sounds", isDirectory: true)
-        let soundURL = soundsURL.appendingPathComponent(fileName)
-        guard !fileManager.fileExists(atPath: soundURL.path) else { return }
 
         do {
             try fileManager.createDirectory(at: soundsURL, withIntermediateDirectories: true)
-            try makeAlarmWaveData().write(to: soundURL, options: .atomic)
+            for alert in TimerEndAlert.allCases {
+                guard let fileName = alert.soundFileName else { continue }
+                let soundURL = soundsURL.appendingPathComponent(fileName)
+                guard !fileManager.fileExists(atPath: soundURL.path) else { continue }
+                try makeWaveData(for: alert).write(to: soundURL, options: .atomic)
+            }
         } catch {
-            // iOS falls back to its default notification sound if this file cannot be installed.
+            // iOS falls back to its default notification sound if a custom tone cannot be installed.
         }
     }
 
-    private static func makeAlarmWaveData() -> Data {
+    static func fileURL(for alert: TimerEndAlert) -> URL? {
+        guard let fileName = alert.soundFileName, let soundsURL else { return nil }
+        installIfNeeded()
+        let url = soundsURL.appendingPathComponent(fileName)
+        return FileManager.default.fileExists(atPath: url.path) ? url : nil
+    }
+
+    private static var soundsURL: URL? {
+        FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("Sounds", isDirectory: true)
+    }
+
+    private static func makeWaveData(for alert: TimerEndAlert) -> Data {
         let sampleRate: UInt32 = 22_050
         let channelCount: UInt16 = 1
         let bitsPerSample: UInt16 = 16
-        let duration = 29.0
+        let duration = 28.5
         let sampleCount = Int(Double(sampleRate) * duration)
         var samples = Data(capacity: sampleCount * 2)
 
         for index in 0..<sampleCount {
             let time = Double(index) / Double(sampleRate)
-            let pulse = time.truncatingRemainder(dividingBy: 0.8)
-            let active = pulse < 0.58
-            let edge = min(min(pulse / 0.015, (0.58 - pulse) / 0.015), 1)
-            let envelope = active ? max(0, edge) : 0
-            let frequency = pulse < 0.29 ? 880.0 : 740.0
-            let sample = Int16(
-                sin(2 * Double.pi * frequency * time) * Double(Int16.max) * 0.35 * envelope
-            )
-            appendLittleEndian(sample, to: &samples)
+            let value: Double
+
+            switch alert {
+            case .defaultSound:
+                let cycle = time.truncatingRemainder(dividingBy: 0.8)
+                let envelope = pulseEnvelope(cycle, start: 0, duration: 0.58)
+                let frequency = cycle < 0.29 ? 880.0 : 740.0
+                value = sin(2 * Double.pi * frequency * time) * 0.35 * envelope
+
+            case .chime:
+                let cycle = time.truncatingRemainder(dividingBy: 2.4)
+                let frequencies = [659.25, 783.99, 987.77]
+                let noteIndex = min(2, Int(cycle / 0.45))
+                let noteTime = cycle - Double(noteIndex) * 0.45
+                let isActive = cycle < 1.35 && noteTime < 0.4
+                let attack = min(1, noteTime / 0.012)
+                let envelope = isActive ? attack * exp(-5.5 * noteTime) : 0
+                let frequency = frequencies[noteIndex]
+                value = (
+                    sin(2 * Double.pi * frequency * time)
+                    + 0.28 * sin(2 * Double.pi * frequency * 2 * time)
+                ) * 0.28 * envelope
+
+            case .pulse:
+                let cycle = time.truncatingRemainder(dividingBy: 1.0)
+                let first = pulseEnvelope(cycle, start: 0, duration: 0.16)
+                let second = pulseEnvelope(cycle, start: 0.28, duration: 0.16)
+                let firstTone = sin(2 * Double.pi * 540 * time) * first
+                let secondTone = sin(2 * Double.pi * 760 * time) * second
+                value = (firstTone + secondTone) * 0.36
+
+            case .jetLock:
+                let cycle = time.truncatingRemainder(dividingBy: 0.68)
+                let first = pulseEnvelope(cycle, start: 0, duration: 0.12)
+                let second = pulseEnvelope(cycle, start: 0.20, duration: 0.12)
+                let localTime = cycle < 0.20 ? cycle : cycle - 0.20
+                let sweep = min(1, max(0, localTime / 0.12))
+                let frequency = 1_250 + 520 * sweep + 45 * sin(2 * Double.pi * 24 * time)
+                let carrier = sin(2 * Double.pi * frequency * time)
+                let harmonic = sin(2 * Double.pi * frequency * 2 * time)
+                value = (carrier + 0.2 * harmonic) * 0.33 * (first + second)
+
+            case .silent:
+                value = 0
+            }
+
+            let clamped = min(1, max(-1, value))
+            appendLittleEndian(Int16(clamped * Double(Int16.max)), to: &samples)
         }
 
         let byteRate = sampleRate * UInt32(channelCount) * UInt32(bitsPerSample / 8)
@@ -59,6 +110,18 @@ enum TimerAlarmSound {
         appendLittleEndian(UInt32(samples.count), to: &wave)
         wave.append(samples)
         return wave
+    }
+
+    private static func pulseEnvelope(
+        _ phase: Double,
+        start: Double,
+        duration: Double
+    ) -> Double {
+        let local = phase - start
+        guard local >= 0, local < duration else { return 0 }
+        let attack = min(1, local / 0.008)
+        let release = min(1, (duration - local) / 0.018)
+        return max(0, min(attack, release))
     }
 
     private static func appendLittleEndian<Value: FixedWidthInteger>(_ value: Value, to data: inout Data) {
