@@ -55,6 +55,7 @@ private func flowCategoryColor(_ category: String) -> Color {
     case "Work": return .blue
     case "Personal": return .green
     case "Focus time": return .purple
+    case "Other": return .secondary
     default:
         let palette: [Color] = [.orange, .pink, .teal, .indigo, .mint, .cyan]
         let value = category.unicodeScalars.reduce(0) { $0 + Int($1.value) }
@@ -685,7 +686,7 @@ private struct CategoryManagerSheet: View {
                 } header: {
                     Text("Categories")
                 } footer: {
-                    Text("Swipe left to delete. Existing events will be moved to another category.")
+                    Text("Swipe left to delete. Existing events move to another category, and tasks move to Other.")
                 }
             }
             .navigationTitle("Categories")
@@ -727,9 +728,13 @@ private struct TaskCell: View {
                     .foregroundStyle(task.done ? Color.secondary : Color.primary)
                     .multilineTextAlignment(.leading)
 
-                Label(formattedTaskEstimate(task.estimate), systemImage: "clock")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                HStack(spacing: 12) {
+                    Label(formattedTaskEstimate(task.estimate), systemImage: "clock")
+                    Label(task.category ?? "Other", systemImage: "tag")
+                        .foregroundStyle(flowCategoryColor(task.category ?? "Other"))
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
             .contentShape(Rectangle())
@@ -751,6 +756,7 @@ private struct TaskListView: View {
     @EnvironmentObject private var store: FlowtimeStore
     @State private var editorTarget: TaskEditorTarget?
     @State private var showingCompleted = false
+    @State private var showingCategories = false
     @State private var feedbackTrigger = 0
 
     private var openTasks: [FlowTask] {
@@ -796,17 +802,20 @@ private struct TaskListView: View {
             .navigationTitle("Tasks")
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    if !completedTasks.isEmpty {
-                        Menu {
+                    Menu {
+                        Button("Manage Categories", systemImage: "tag") {
+                            showingCategories = true
+                        }
+                        if !completedTasks.isEmpty {
                             Button(showingCompleted ? "Hide Completed" : "Show Completed",
                                    systemImage: showingCompleted ? "eye.slash" : "eye") {
                                 withAnimation { showingCompleted.toggle() }
                             }
-                        } label: {
-                            Image(systemName: "ellipsis.circle")
                         }
-                        .accessibilityLabel("Task options")
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
                     }
+                    .accessibilityLabel("Task options")
                 }
             }
             .safeAreaInset(edge: .bottom, spacing: 0) {
@@ -828,6 +837,9 @@ private struct TaskListView: View {
                 TaskEditorSheet(task: target.task)
                     .presentationDetents([.medium, .large])
                     .presentationDragIndicator(.visible)
+            }
+            .sheet(isPresented: $showingCategories) {
+                CategoryManagerSheet()
             }
             .sensoryFeedback(.selection, trigger: feedbackTrigger)
         }
@@ -873,6 +885,8 @@ private struct TaskEditorSheet: View {
     let task: FlowTask?
     @State private var title: String
     @State private var estimateMinutes: Int
+    @State private var selectedCategory: String?
+    @State private var showingCategories = false
     @FocusState private var titleFocused: Bool
     private let presets = [5, 15, 20, 25, 30, 60, 120]
 
@@ -881,6 +895,7 @@ private struct TaskEditorSheet: View {
         _title = State(initialValue: task?.title ?? "")
         let initialEstimate = task?.estimate ?? 25
         _estimateMinutes = State(initialValue: min(1_439, max(1, initialEstimate)))
+        _selectedCategory = State(initialValue: task?.category)
     }
 
     var body: some View {
@@ -936,6 +951,23 @@ private struct TaskEditorSheet: View {
                         }
                     }
                 }
+
+                Section {
+                    Picker("Category", selection: $selectedCategory) {
+                        Text("Other").tag(Optional<String>.none)
+                        ForEach(store.categories, id: \.self) { category in
+                            Text(category).tag(Optional(category))
+                        }
+                    }
+
+                    Button("Manage Categories", systemImage: "tag") {
+                        showingCategories = true
+                    }
+                } header: {
+                    Text("Category")
+                } footer: {
+                    Text("Choose Other to exclude this task from categories. Its focus time will be counted under Other.")
+                }
             }
             .sensoryFeedback(.selection, trigger: estimateMinutes)
             .navigationTitle(task == nil ? "New Task" : "Edit Task")
@@ -950,6 +982,9 @@ private struct TaskEditorSheet: View {
                 }
             }
             .onAppear { titleFocused = true }
+            .sheet(isPresented: $showingCategories) {
+                CategoryManagerSheet()
+            }
         }
     }
 
@@ -976,9 +1011,10 @@ private struct TaskEditorSheet: View {
         if var updated = task {
             updated.title = title
             updated.estimate = estimateMinutes
+            updated.category = selectedCategory
             store.updateTask(updated)
         } else {
-            store.addTask(title: title, estimate: estimateMinutes)
+            store.addTask(title: title, estimate: estimateMinutes, category: selectedCategory)
         }
         dismiss()
     }
@@ -1219,15 +1255,11 @@ private struct SettingsView: View {
                         HStack(spacing: 12) {
                             Button {
                                 store.setTimerEndAlert(alert)
-                                if alert == .silent {
-                                    previewPlayer.stop()
-                                } else {
-                                    previewPlayer.play(alert)
-                                }
+                                previewPlayer.play(alert)
                             } label: {
                                 HStack(spacing: 12) {
                                     Image(systemName: soundIcon(for: alert))
-                                        .foregroundStyle(alert == .jetLock ? Color.orange : Color.accentColor)
+                                        .foregroundStyle(soundColor(for: alert))
                                         .frame(width: 24)
 
                                     VStack(alignment: .leading, spacing: 3) {
@@ -1263,7 +1295,7 @@ private struct SettingsView: View {
                 } header: {
                     Text("When Timer Ends")
                 } footer: {
-                    Text("Jet Lock is an original synthesized fighter-jet radar warning tone.")
+                    Text("Inspired by fighter-jet warning patterns. These are original synthesized alerts, not audio copied from the reference videos.")
                 }
 
                 Section {
@@ -1298,10 +1330,17 @@ private struct SettingsView: View {
     private func soundIcon(for alert: TimerEndAlert) -> String {
         switch alert {
         case .defaultSound: return "bell.fill"
-        case .chime: return "music.note"
-        case .pulse: return "waveform"
-        case .jetLock: return "airplane"
-        case .silent: return "speaker.slash.fill"
+        case .tws: return "scope"
+        case .masterCaution: return "exclamationmark.triangle.fill"
+        case .missileLaunch: return "exclamationmark.shield.fill"
+        case .rwr: return "antenna.radiowaves.left.and.right"
+        }
+    }
+
+    private func soundColor(for alert: TimerEndAlert) -> Color {
+        switch alert {
+        case .defaultSound: return Color.accentColor
+        case .tws, .masterCaution, .missileLaunch, .rwr: return .orange
         }
     }
 }
@@ -1322,155 +1361,166 @@ private struct StatTile: View {
 }
 
 private enum InsightRange: String, CaseIterable, Identifiable {
+    case day = "Day"
     case week = "Week"
     case month = "Month"
+    case year = "Year"
+
     var id: String { rawValue }
+
+    var component: Calendar.Component {
+        switch self {
+        case .day: return .day
+        case .week: return .weekOfYear
+        case .month: return .month
+        case .year: return .year
+        }
+    }
+
+    var currentTitle: String {
+        switch self {
+        case .day: return "Today"
+        case .week: return "This Week"
+        case .month: return "This Month"
+        case .year: return "This Year"
+        }
+    }
 }
 
 private struct InsightMetric: Identifiable {
-    let id: String
-    let label: String
-    let value: Double
+    let id: Date
+    let start: Date
+    let seconds: Int
 }
 
 private struct CategoryMetric: Identifiable {
-    let id: String
+    var id: String { name }
     let name: String
-    let hours: Double
+    let seconds: Int
+}
+
+private struct FocusPeriodSummary: Identifiable {
+    let range: InsightRange
+    let seconds: Int
+    var id: InsightRange { range }
 }
 
 private struct InsightsView: View {
     @EnvironmentObject private var store: FlowtimeStore
     @State private var range: InsightRange = .week
     @State private var showingSettings = false
-    private let weeklyValues = [4.2, 5.5, 3.1, 6.4, 4.8, 2.2, 1.4]
-    private let monthlyValues = [3.5, 4.7, 5.9, 4.1, 6.2, 3.8, 5.1]
-    private let trendData = [
-        InsightMetric(id: "w1", label: "W1", value: 14.2),
-        InsightMetric(id: "w2", label: "W2", value: 17.8),
-        InsightMetric(id: "w3", label: "W3", value: 16.1),
-        InsightMetric(id: "w4", label: "W4", value: 21.4),
-        InsightMetric(id: "w5", label: "W5", value: 18.4)
-    ]
-    private let categoryData = [
-        CategoryMetric(id: "work", name: "Work", hours: 10.4),
-        CategoryMetric(id: "focus", name: "Focus time", hours: 5.8),
-        CategoryMetric(id: "personal", name: "Personal", hours: 2.2)
-    ]
-    private let hourlyData = [
-        InsightMetric(id: "8", label: "8 AM", value: 42),
-        InsightMetric(id: "10", label: "10 AM", value: 81),
-        InsightMetric(id: "12", label: "12 PM", value: 54),
-        InsightMetric(id: "14", label: "2 PM", value: 92),
-        InsightMetric(id: "16", label: "4 PM", value: 68),
-        InsightMetric(id: "18", label: "6 PM", value: 31)
-    ]
 
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
+                VStack(alignment: .leading, spacing: 16) {
+                    totalFocusCard
+
+                    periodSummaryCard
+
                     Picker("Insight range", selection: $range) {
                         ForEach(InsightRange.allCases) { item in Text(item.rawValue).tag(item) }
                     }
                     .pickerStyle(.segmented)
 
-                    Text(range == .week ? formattedDuration(store.weeklyFocusSeconds) : "72h 10m")
-                        .font(.system(size: 38, weight: .bold))
-                    Text(range == .week ? "Focused this week" : "Focused this month")
-                        .foregroundStyle(.secondary)
+                    InsightCard(
+                        title: range.currentTitle,
+                        subtitle: "\(store.focusSessionCount(in: selectedInterval)) completed focus sessions"
+                    ) {
+                        Text(formattedDetailedDuration(selectedFocusSeconds))
+                            .font(.system(size: 28, weight: .bold, design: .rounded))
+                            .monospacedDigit()
+                            .minimumScaleFactor(0.7)
 
-                    InsightCard(title: "Focus by day", subtitle: "Hours of focused work") {
-                        Chart(dailyData) { item in
-                            BarMark(
-                                x: .value("Day", item.label),
-                                y: .value("Hours", item.value)
+                        if selectedFocusSeconds == 0 {
+                            insightEmptyState(
+                                title: "No Focus Time",
+                                message: "Complete a task timer to see activity here."
                             )
-                            .foregroundStyle(Color.accentColor.gradient)
-                            .cornerRadius(5)
-                        }
-                        .chartYAxis {
-                            AxisMarks(position: .leading)
-                        }
-                        .animation(.easeInOut(duration: 0.25), value: range)
-                    }
-
-                    HStack(spacing: 12) {
-                        StatTile(value: "\(store.tasks.filter(\.done).count)", label: "Tasks completed")
-                        StatTile(value: "\(store.sessionCount)", label: "Focus sessions")
-                    }
-
-                    InsightCard(title: "Focus trend", subtitle: "Last five weeks") {
-                        Chart(trendData) { item in
-                            AreaMark(
-                                x: .value("Week", item.label),
-                                y: .value("Hours", item.value)
-                            )
-                            .foregroundStyle(
-                                LinearGradient(
-                                    colors: [Color.accentColor.opacity(0.35), Color.accentColor.opacity(0.03)],
-                                    startPoint: .top,
-                                    endPoint: .bottom
+                        } else {
+                            Chart(activityData) { item in
+                                BarMark(
+                                    x: .value("Period", item.start),
+                                    y: .value("Minutes", Double(item.seconds) / 60)
                                 )
-                            )
-                            LineMark(
-                                x: .value("Week", item.label),
-                                y: .value("Hours", item.value)
-                            )
-                            .foregroundStyle(Color.accentColor)
-                            .lineStyle(StrokeStyle(lineWidth: 3, lineCap: .round, lineJoin: .round))
-                            PointMark(
-                                x: .value("Week", item.label),
-                                y: .value("Hours", item.value)
-                            )
-                            .foregroundStyle(Color.accentColor)
-                        }
-                        .chartYScale(domain: 0...24)
-                    }
-
-                    InsightCard(title: "Time by category", subtitle: "Where your focus went") {
-                        HStack(spacing: 20) {
-                            Chart(categoryData) { item in
-                                SectorMark(
-                                    angle: .value("Hours", item.hours),
-                                    innerRadius: .ratio(0.62),
-                                    angularInset: 2
-                                )
-                                .foregroundStyle(by: .value("Category", item.name))
+                                .foregroundStyle(Color.accentColor.gradient)
                                 .cornerRadius(4)
                             }
-                            .chartForegroundStyleScale([
-                                "Work": Color.blue,
-                                "Focus time": Color.purple,
-                                "Personal": Color.green
-                            ])
-                            .chartLegend(.hidden)
-                            .frame(width: 145)
-
-                            VStack(alignment: .leading, spacing: 12) {
-                                ForEach(categoryData) { item in
-                                    HStack {
-                                        Circle().fill(categoryColor(item.name)).frame(width: 8, height: 8)
-                                        Text(item.name).font(.caption)
-                                        Spacer()
-                                        Text("\(item.hours, specifier: "%.1f")h")
-                                            .font(.caption.bold())
+                            .chartXAxis {
+                                AxisMarks(values: .automatic(desiredCount: axisMarkCount)) { value in
+                                    AxisGridLine()
+                                    AxisTick()
+                                    AxisValueLabel {
+                                        if let date = value.as(Date.self) {
+                                            Text(activityAxisLabel(for: date))
+                                        }
                                     }
                                 }
                             }
+                            .chartYAxis {
+                                AxisMarks(position: .leading) { value in
+                                    AxisGridLine()
+                                    AxisValueLabel {
+                                        if let minutes = value.as(Double.self) {
+                                            Text(axisDuration(Int(minutes * 60)))
+                                        }
+                                    }
+                                }
+                            }
+                            .frame(height: 190)
+                            .animation(.easeInOut(duration: 0.25), value: range)
                         }
                     }
 
-                    InsightCard(title: "Productive hours", subtitle: "Focus score throughout the day") {
-                        Chart(hourlyData) { item in
-                            BarMark(
-                                x: .value("Time", item.label),
-                                y: .value("Focus score", item.value)
+                    InsightCard(
+                        title: "Time by Category",
+                        subtitle: "\(range.currentTitle) · Tasks without a category count as Other"
+                    ) {
+                        if categoryData.isEmpty {
+                            insightEmptyState(
+                                title: "No Category Data",
+                                message: "Assign categories in Tasks, then complete a timer."
                             )
-                            .foregroundStyle(item.value >= 80 ? Color.green.gradient : Color.accentColor.gradient)
-                            .cornerRadius(4)
+                        } else {
+                            Chart(categoryData) { item in
+                                SectorMark(
+                                    angle: .value("Seconds", item.seconds),
+                                    innerRadius: .ratio(0.64),
+                                    angularInset: 2
+                                )
+                                .foregroundStyle(flowCategoryColor(item.name))
+                                .cornerRadius(4)
+                            }
+                            .chartLegend(.hidden)
+                            .frame(height: 180)
+                            .overlay {
+                                VStack(spacing: 2) {
+                                    Text(formattedCompactDuration(selectedFocusSeconds))
+                                        .font(.headline)
+                                        .monospacedDigit()
+                                    Text("total")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+
+                            VStack(spacing: 0) {
+                                ForEach(Array(categoryData.enumerated()), id: \.element.id) { index, item in
+                                    if index > 0 { Divider() }
+                                    HStack(spacing: 10) {
+                                        Circle()
+                                            .fill(flowCategoryColor(item.name))
+                                            .frame(width: 10, height: 10)
+                                        Text(item.name)
+                                        Spacer()
+                                        Text(formattedDetailedDuration(item.seconds))
+                                            .font(.subheadline.weight(.semibold))
+                                            .monospacedDigit()
+                                    }
+                                    .padding(.vertical, 10)
+                                }
+                            }
                         }
-                        .chartYScale(domain: 0...100)
                     }
                 }
                 .padding()
@@ -1493,19 +1543,178 @@ private struct InsightsView: View {
         }
     }
 
-    private var values: [Double] { range == .week ? weeklyValues : monthlyValues }
-    private var dailyData: [InsightMetric] {
-        zip(["M", "T", "W", "T", "F", "S", "S"], values).enumerated().map { index, pair in
-            InsightMetric(id: "day-\(index)", label: pair.0, value: pair.1)
+    private var totalFocusCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("Total Focus Time", systemImage: "timer")
+                .font(.headline)
+                .foregroundStyle(.secondary)
+            Text(formattedDetailedDuration(store.totalFocusSeconds))
+                .font(.system(size: 34, weight: .bold, design: .rounded))
+                .monospacedDigit()
+                .minimumScaleFactor(0.65)
+                .lineLimit(1)
+            Text("Across \(store.focusSessions.count) completed focus sessions")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(20)
+        .background(Color.accentColor.opacity(0.12))
+        .clipShape(RoundedRectangle(cornerRadius: 22))
+    }
+
+    private var periodSummaryCard: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("Focus Summary")
+                .font(.headline)
+                .padding(.bottom, 8)
+
+            ForEach(Array(periodSummaries.enumerated()), id: \.element.id) { index, summary in
+                if index > 0 { Divider() }
+                HStack(spacing: 12) {
+                    Image(systemName: periodIcon(summary.range))
+                        .foregroundStyle(Color.accentColor)
+                        .frame(width: 24)
+                    Text(summary.range.currentTitle)
+                    Spacer()
+                    Text(formattedDetailedDuration(summary.seconds))
+                        .font(.subheadline.weight(.semibold))
+                        .monospacedDigit()
+                }
+                .padding(.vertical, 11)
+            }
+        }
+        .padding(18)
+        .background(.background)
+        .clipShape(RoundedRectangle(cornerRadius: 20))
+    }
+
+    private var periodSummaries: [FocusPeriodSummary] {
+        InsightRange.allCases.map { item in
+            FocusPeriodSummary(range: item, seconds: store.focusSeconds(in: interval(for: item)))
         }
     }
 
-    private func categoryColor(_ name: String) -> Color {
-        name == "Personal" ? .green : name == "Focus time" ? .purple : .blue
+    private var selectedInterval: DateInterval {
+        interval(for: range)
     }
 
-    private func formattedDuration(_ seconds: Int) -> String {
-        "\(seconds / 3_600)h \((seconds % 3_600) / 60)m"
+    private var selectedFocusSeconds: Int {
+        store.focusSeconds(in: selectedInterval)
+    }
+
+    private var categoryData: [CategoryMetric] {
+        store.focusSecondsByCategory(in: selectedInterval)
+            .map { CategoryMetric(name: $0.key, seconds: $0.value) }
+            .sorted {
+                if $0.seconds == $1.seconds {
+                    return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+                }
+                return $0.seconds > $1.seconds
+            }
+    }
+
+    private var activityData: [InsightMetric] {
+        let interval = selectedInterval
+        let calendar = Calendar.current
+        let count: Int
+        let component: Calendar.Component
+
+        switch range {
+        case .day:
+            count = 24
+            component = .hour
+        case .week:
+            count = 7
+            component = .day
+        case .month:
+            count = calendar.range(of: .day, in: .month, for: interval.start)?.count ?? 30
+            component = .day
+        case .year:
+            count = 12
+            component = .month
+        }
+
+        return (0..<count).compactMap { index in
+            guard let start = calendar.date(byAdding: component, value: index, to: interval.start),
+                  let calculatedEnd = calendar.date(byAdding: component, value: 1, to: start) else { return nil }
+            let bucket = DateInterval(start: start, end: min(calculatedEnd, interval.end))
+            return InsightMetric(id: start, start: start, seconds: store.focusSeconds(in: bucket))
+        }
+    }
+
+    private var axisMarkCount: Int {
+        switch range {
+        case .day: return 6
+        case .week: return 7
+        case .month: return 6
+        case .year: return 6
+        }
+    }
+
+    private func interval(for range: InsightRange) -> DateInterval {
+        Calendar.current.dateInterval(of: range.component, for: Date())
+            ?? DateInterval(start: Calendar.current.startOfDay(for: Date()), duration: 86_400)
+    }
+
+    private func periodIcon(_ range: InsightRange) -> String {
+        switch range {
+        case .day: return "sun.max.fill"
+        case .week: return "calendar"
+        case .month: return "calendar.circle.fill"
+        case .year: return "chart.bar.fill"
+        }
+    }
+
+    private func activityAxisLabel(for date: Date) -> String {
+        let formatter = DateFormatter()
+        switch range {
+        case .day: formatter.dateFormat = "ha"
+        case .week: formatter.dateFormat = "EEE"
+        case .month: formatter.dateFormat = "d"
+        case .year: formatter.dateFormat = "MMM"
+        }
+        return formatter.string(from: date)
+    }
+
+    private func formattedDetailedDuration(_ seconds: Int) -> String {
+        let safeSeconds = max(0, seconds)
+        return String(
+            format: "%02d h %02d m %02d s",
+            safeSeconds / 3_600,
+            (safeSeconds % 3_600) / 60,
+            safeSeconds % 60
+        )
+    }
+
+    private func formattedCompactDuration(_ seconds: Int) -> String {
+        let safeSeconds = max(0, seconds)
+        let hours = safeSeconds / 3_600
+        let minutes = (safeSeconds % 3_600) / 60
+        if hours > 0 { return "\(hours)h \(minutes)m" }
+        if minutes > 0 { return "\(minutes)m" }
+        return "\(safeSeconds)s"
+    }
+
+    private func axisDuration(_ seconds: Int) -> String {
+        let safeSeconds = max(0, seconds)
+        if safeSeconds >= 3_600 { return "\(safeSeconds / 3_600)h" }
+        return "\(safeSeconds / 60)m"
+    }
+
+    private func insightEmptyState(title: String, message: String) -> some View {
+        VStack(spacing: 8) {
+            Image(systemName: "chart.bar.xaxis")
+                .font(.title2)
+                .foregroundStyle(.secondary)
+            Text(title)
+                .font(.headline)
+            Text(message)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity, minHeight: 150)
     }
 }
 
@@ -1527,7 +1736,6 @@ private struct InsightCard<Content: View>: View {
                 Text(subtitle).font(.caption).foregroundStyle(.secondary)
             }
             content
-                .frame(height: 210)
         }
         .padding(18)
         .background(.background)

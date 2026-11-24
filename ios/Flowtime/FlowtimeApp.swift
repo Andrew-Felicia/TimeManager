@@ -3,12 +3,28 @@ import UIKit
 import UserNotifications
 
 enum TimerAlarmSound {
+    private static let retiredSoundFileNames = [
+        "flowtime-chime.wav",
+        "flowtime-pulse.wav",
+        "flowtime-jet-lock.wav",
+        "flowtime-rwr-lock.wav",
+        "flowtime-tws-launch-2.wav",
+        "flowtime-master-caution.wav"
+    ]
+
     static func installIfNeeded() {
         guard let soundsURL else { return }
         let fileManager = FileManager.default
 
         do {
             try fileManager.createDirectory(at: soundsURL, withIntermediateDirectories: true)
+            for fileName in retiredSoundFileNames {
+                let retiredURL = soundsURL.appendingPathComponent(fileName)
+                if fileManager.fileExists(atPath: retiredURL.path) {
+                    try fileManager.removeItem(at: retiredURL)
+                }
+            }
+
             for alert in TimerEndAlert.allCases {
                 guard let fileName = alert.soundFileName else { continue }
                 let soundURL = soundsURL.appendingPathComponent(fileName)
@@ -51,41 +67,45 @@ enum TimerAlarmSound {
                 let frequency = cycle < 0.29 ? 880.0 : 740.0
                 value = sin(2 * Double.pi * frequency * time) * 0.35 * envelope
 
-            case .chime:
-                let cycle = time.truncatingRemainder(dividingBy: 2.4)
-                let frequencies = [659.25, 783.99, 987.77]
-                let noteIndex = min(2, Int(cycle / 0.45))
-                let noteTime = cycle - Double(noteIndex) * 0.45
-                let isActive = cycle < 1.35 && noteTime < 0.4
-                let attack = min(1, noteTime / 0.012)
-                let envelope = isActive ? attack * exp(-5.5 * noteTime) : 0
-                let frequency = frequencies[noteIndex]
-                value = (
-                    sin(2 * Double.pi * frequency * time)
-                    + 0.28 * sin(2 * Double.pi * frequency * 2 * time)
-                ) * 0.28 * envelope
+            case .tws:
+                let cycle = time.truncatingRemainder(dividingBy: 1.18)
+                let first = pulseEnvelope(cycle, start: 0, duration: 0.085)
+                let second = pulseEnvelope(cycle, start: 0.135, duration: 0.085)
+                let third = pulseEnvelope(cycle, start: 0.31, duration: 0.12)
+                let lowTone = sin(2 * Double.pi * 930 * time) * first
+                let middleTone = sin(2 * Double.pi * 1_180 * time) * second
+                let highTone = sin(2 * Double.pi * 1_460 * time) * third
+                value = (lowTone + middleTone + highTone) * 0.36
 
-            case .pulse:
-                let cycle = time.truncatingRemainder(dividingBy: 1.0)
-                let first = pulseEnvelope(cycle, start: 0, duration: 0.16)
-                let second = pulseEnvelope(cycle, start: 0.28, duration: 0.16)
-                let firstTone = sin(2 * Double.pi * 540 * time) * first
-                let secondTone = sin(2 * Double.pi * 760 * time) * second
-                value = (firstTone + secondTone) * 0.36
+            case .masterCaution:
+                let cycle = time.truncatingRemainder(dividingBy: 2.15)
+                let first = pulseEnvelope(cycle, start: 0, duration: 0.17)
+                let second = pulseEnvelope(cycle, start: 0.25, duration: 0.17)
+                let third = pulseEnvelope(cycle, start: 0.50, duration: 0.17)
+                let fourth = pulseEnvelope(cycle, start: 0.75, duration: 0.20)
+                let envelope = first + second + third + fourth
+                let carrier = sin(2 * Double.pi * 740 * time)
+                let harmonic = sin(2 * Double.pi * 1_480 * time)
+                value = (carrier + 0.20 * harmonic) * 0.34 * envelope
 
-            case .jetLock:
-                let cycle = time.truncatingRemainder(dividingBy: 0.68)
-                let first = pulseEnvelope(cycle, start: 0, duration: 0.12)
-                let second = pulseEnvelope(cycle, start: 0.20, duration: 0.12)
-                let localTime = cycle < 0.20 ? cycle : cycle - 0.20
-                let sweep = min(1, max(0, localTime / 0.12))
-                let frequency = 1_250 + 520 * sweep + 45 * sin(2 * Double.pi * 24 * time)
+            case .missileLaunch:
+                let cycle = time.truncatingRemainder(dividingBy: 0.48)
+                let sweep = cycle / 0.48
+                let frequency = 1_350 + 950 * (1 - abs(2 * sweep - 1))
+                let urgency = 0.72 + 0.28 * sin(2 * Double.pi * 16 * time)
+                let carrier = sin(2 * Double.pi * frequency * time)
+                let harmonic = sin(2 * Double.pi * frequency * 1.5 * time)
+                value = (carrier + 0.18 * harmonic) * 0.32 * urgency
+
+            case .rwr:
+                let cycle = time.truncatingRemainder(dividingBy: 0.78)
+                let first = pulseEnvelope(cycle, start: 0, duration: 0.19)
+                let second = pulseEnvelope(cycle, start: 0.30, duration: 0.19)
+                let activeEnvelope = first + second
+                let frequency = 1_040 + 70 * sin(2 * Double.pi * 22 * time)
                 let carrier = sin(2 * Double.pi * frequency * time)
                 let harmonic = sin(2 * Double.pi * frequency * 2 * time)
-                value = (carrier + 0.2 * harmonic) * 0.33 * (first + second)
-
-            case .silent:
-                value = 0
+                value = (carrier + 0.22 * harmonic) * 0.34 * activeEnvelope
             }
 
             let clamped = min(1, max(-1, value))

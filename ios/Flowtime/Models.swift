@@ -7,21 +7,24 @@ struct FlowTask: Identifiable, Codable, Hashable {
     var title: String
     var estimate: Int
     var done: Bool
+    var category: String?
 
     init(
         id: String,
         title: String,
         estimate: Int = 25,
-        done: Bool = false
+        done: Bool = false,
+        category: String? = nil
     ) {
         self.id = id
         self.title = title
         self.estimate = estimate
         self.done = done
+        self.category = category
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, title, estimate, done
+        case id, title, estimate, done, category
     }
 
     init(from decoder: Decoder) throws {
@@ -30,6 +33,7 @@ struct FlowTask: Identifiable, Codable, Hashable {
         title = try container.decode(String.self, forKey: .title)
         estimate = min(1_439, max(1, try container.decodeIfPresent(Int.self, forKey: .estimate) ?? 25))
         done = try container.decodeIfPresent(Bool.self, forKey: .done) ?? false
+        category = try container.decodeIfPresent(String.self, forKey: .category)
     }
 }
 
@@ -69,10 +73,10 @@ struct FlowEvent: Identifiable, Codable, Hashable {
 
 enum TimerEndAlert: String, CaseIterable, Identifiable, Codable {
     case defaultSound = "Default"
-    case chime = "Chime"
-    case pulse = "Pulse"
-    case jetLock = "Jet Lock"
-    case silent = "Silent"
+    case tws = "TWS"
+    case masterCaution = "Master Caution"
+    case missileLaunch = "Missile Launch"
+    case rwr = "RWR"
 
     var id: String { rawValue }
 
@@ -83,21 +87,46 @@ enum TimerEndAlert: String, CaseIterable, Identifiable, Codable {
     var description: String {
         switch self {
         case .defaultSound: return "Alternating alarm"
-        case .chime: return "Bright three-note chime"
-        case .pulse: return "Electronic double pulse"
-        case .jetLock: return "Original fighter-jet radar warning"
-        case .silent: return "Notification without sound"
+        case .tws: return "Track-while-scan warning chirps"
+        case .masterCaution: return "Four-beat caution warning"
+        case .missileLaunch: return "Rapid launch-warning siren"
+        case .rwr: return "Radar-warning receiver cadence"
         }
     }
 
     var soundFileName: String? {
         switch self {
         case .defaultSound: return "flowtime-alarm.wav"
-        case .chime: return "flowtime-chime.wav"
-        case .pulse: return "flowtime-pulse.wav"
-        case .jetLock: return "flowtime-jet-lock.wav"
-        case .silent: return nil
+        case .tws: return "flowtime-tws-v2.wav"
+        case .masterCaution: return "flowtime-master-caution-v2.wav"
+        case .missileLaunch: return "flowtime-missile-launch-v2.wav"
+        case .rwr: return "flowtime-rwr-v2.wav"
         }
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        let storedValue = try container.decode(String.self)
+
+        switch storedValue {
+        case Self.defaultSound.rawValue:
+            self = .defaultSound
+        case Self.tws.rawValue, "TWS Launch 2":
+            self = .tws
+        case Self.masterCaution.rawValue:
+            self = .masterCaution
+        case Self.missileLaunch.rawValue:
+            self = .missileLaunch
+        case Self.rwr.rawValue, "RWR Lock", "Jet Lock":
+            self = .rwr
+        default:
+            self = .defaultSound
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
     }
 }
 
@@ -131,9 +160,27 @@ private struct PersistedTimerState: Codable {
     let remainingByTask: [String: Int]?
 }
 
-private struct PersistedFocusSession: Codable {
+struct FocusSession: Codable, Hashable {
     let completedAt: Date
     let durationSeconds: Int
+    let category: String?
+
+    init(completedAt: Date, durationSeconds: Int, category: String?) {
+        self.completedAt = completedAt
+        self.durationSeconds = max(0, durationSeconds)
+        self.category = category
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case completedAt, durationSeconds, category
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        completedAt = try container.decode(Date.self, forKey: .completedAt)
+        durationSeconds = max(0, try container.decode(Int.self, forKey: .durationSeconds))
+        category = try container.decodeIfPresent(String.self, forKey: .category)
+    }
 }
 
 @MainActor
@@ -146,8 +193,7 @@ final class FlowtimeStore: ObservableObject {
     @Published private(set) var timerEndAlert: TimerEndAlert = .defaultSound
     @Published private(set) var timerIsRinging = false
     @Published private(set) var timerRemainingByTask: [String: Int] = [:]
-    @Published var weeklyFocusSeconds = 0
-    @Published var sessionCount = 0
+    @Published private(set) var focusSessions: [FocusSession] = []
 
     private var ticker: Timer?
     private var savedTimerSeconds = 0
@@ -155,7 +201,6 @@ final class FlowtimeStore: ObservableObject {
     private var timerIsRunning = false
     private var timerEndDate: Date?
     private var focusLabel = ""
-    private var focusSessions: [PersistedFocusSession] = []
     private let taskStorageKey = "flowtime.tasks.v1"
     private let eventStorageKey = "flowtime.events.v1"
     private let categoryStorageKey = "flowtime.categories.v1"
@@ -251,8 +296,12 @@ final class FlowtimeStore: ObservableObject {
         for index in events.indices where events[index].category == category {
             events[index].category = fallback
         }
+        for index in tasks.indices where tasks[index].category == category {
+            tasks[index].category = nil
+        }
         persistCategories()
         persistEvents()
+        persistTasks()
     }
 
     func toggle(_ task: FlowTask) {
@@ -263,13 +312,14 @@ final class FlowtimeStore: ObservableObject {
         persistTasks()
     }
 
-    func addTask(title: String, estimate: Int) {
+    func addTask(title: String, estimate: Int, category: String?) {
         let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanTitle.isEmpty else { return }
         let task = FlowTask(
             id: UUID().uuidString,
             title: cleanTitle,
-            estimate: min(1_439, max(1, estimate))
+            estimate: min(1_439, max(1, estimate)),
+            category: normalizedTaskCategory(category)
         )
         tasks.insert(task, at: 0)
         persistTasks()
@@ -281,6 +331,7 @@ final class FlowtimeStore: ObservableObject {
         var cleanTask = task
         cleanTask.title = task.title.trimmingCharacters(in: .whitespacesAndNewlines)
         cleanTask.estimate = min(1_439, max(1, task.estimate))
+        cleanTask.category = normalizedTaskCategory(task.category)
         guard !cleanTask.title.isEmpty else { return }
         tasks[index] = cleanTask
         syncTimer(with: cleanTask, previousEstimate: previousTask.estimate)
@@ -341,8 +392,6 @@ final class FlowtimeStore: ObservableObject {
         if timerIsRunning {
             cancelTimerNotification()
             scheduleTimerNotification()
-        } else if timerIsRinging, alert == .silent {
-            cancelTimerNotification()
         }
     }
 
@@ -439,6 +488,9 @@ final class FlowtimeStore: ObservableObject {
 
     private func finishTimer(preserveCompletionNotification: Bool) {
         let duration = max(0, timerTargetSeconds - savedTimerSeconds)
+        let completedCategory = selectedFocusTaskId
+            .flatMap { taskId in tasks.first(where: { $0.id == taskId }) }
+            .flatMap(\.category)
         timerIsRunning = false
         timerEndDate = nil
         timerIsRinging = false
@@ -447,7 +499,7 @@ final class FlowtimeStore: ObservableObject {
         } else {
             cancelTimerNotification()
         }
-        if duration > 0 { recordFocusSession(duration: duration) }
+        if duration > 0 { recordFocusSession(duration: duration, category: completedCategory) }
         savedTimerSeconds = timerTargetSeconds
         if let selectedFocusTaskId {
             timerRemainingByTask[selectedFocusTaskId] = savedTimerSeconds
@@ -659,25 +711,52 @@ final class FlowtimeStore: ObservableObject {
 
     private func restoreFocusSessions() {
         if let data = UserDefaults.standard.data(forKey: focusSessionStorageKey),
-           let sessions = try? JSONDecoder().decode([PersistedFocusSession].self, from: data) {
+           let sessions = try? JSONDecoder().decode([FocusSession].self, from: data) {
             focusSessions = sessions
         }
-        refreshFocusStats()
     }
 
-    private func recordFocusSession(duration: Int) {
-        focusSessions.append(PersistedFocusSession(completedAt: Date(), durationSeconds: duration))
+    private func recordFocusSession(duration: Int, category: String?) {
+        focusSessions.append(FocusSession(
+            completedAt: Date(),
+            durationSeconds: duration,
+            category: normalizedTaskCategory(category)
+        ))
         if let data = try? JSONEncoder().encode(focusSessions) {
             UserDefaults.standard.set(data, forKey: focusSessionStorageKey)
         }
-        refreshFocusStats()
     }
 
-    private func refreshFocusStats() {
-        sessionCount = focusSessions.count
-        let weekStart = Calendar.current.dateInterval(of: .weekOfYear, for: Date())?.start ?? .distantPast
-        weeklyFocusSeconds = focusSessions
-            .filter { $0.completedAt >= weekStart }
+    var totalFocusSeconds: Int {
+        focusSessions.reduce(0) { $0 + $1.durationSeconds }
+    }
+
+    func focusSeconds(in interval: DateInterval) -> Int {
+        focusSessions
+            .filter { interval.contains($0.completedAt) }
             .reduce(0) { $0 + $1.durationSeconds }
+    }
+
+    func focusSessionCount(in interval: DateInterval) -> Int {
+        focusSessions.lazy.filter { interval.contains($0.completedAt) }.count
+    }
+
+    func focusSecondsByCategory(in interval: DateInterval) -> [String: Int] {
+        focusSessions
+            .filter { interval.contains($0.completedAt) }
+            .reduce(into: [:]) { result, session in
+                let trimmedCategory = session.category?.trimmingCharacters(in: .whitespacesAndNewlines)
+                let name = trimmedCategory.flatMap { $0.isEmpty ? nil : $0 } ?? "Other"
+                result[name, default: 0] += session.durationSeconds
+            }
+    }
+
+    private func normalizedTaskCategory(_ category: String?) -> String? {
+        guard let category = category?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !category.isEmpty,
+              let storedCategory = categories.first(where: {
+                  $0.localizedCaseInsensitiveCompare(category) == .orderedSame
+              }) else { return nil }
+        return storedCategory
     }
 }
