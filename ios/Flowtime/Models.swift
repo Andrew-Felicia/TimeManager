@@ -112,6 +112,13 @@ enum FocusMode: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
+struct StopwatchLap: Identifiable, Codable, Hashable {
+    let id: UUID
+    let number: Int
+    let duration: TimeInterval
+    let totalElapsed: TimeInterval
+}
+
 enum TimerEndAlert: String, CaseIterable, Identifiable, Codable {
     case defaultSound = "Default"
     case silent = "Silent"
@@ -148,6 +155,13 @@ private struct PersistedTimerState: Codable {
     let isRinging: Bool?
 }
 
+private struct PersistedStopwatchState: Codable {
+    let accumulatedTime: TimeInterval
+    let startDate: Date?
+    let isRunning: Bool
+    let laps: [StopwatchLap]
+}
+
 private struct PersistedFocusSession: Codable {
     let completedAt: Date
     let durationSeconds: Int
@@ -168,20 +182,24 @@ final class FlowtimeStore: ObservableObject {
     @Published private(set) var focusLabel = ""
     @Published private(set) var timerEndAlert: TimerEndAlert = .defaultSound
     @Published private(set) var timerIsRinging = false
+    @Published private(set) var stopwatchIsRunning = false
+    @Published private(set) var stopwatchLaps: [StopwatchLap] = []
     @Published var weeklyFocusSeconds = 0
     @Published var sessionCount = 0
 
     private var ticker: Timer?
     private var savedTimerSeconds = 3_000
-    private var savedStopwatchSeconds = 0
-    private var runningMode: FocusMode?
+    private var timerIsRunning = false
     private var timerEndDate: Date?
+    private var stopwatchAccumulatedTime: TimeInterval = 0
+    private var stopwatchStartDate: Date?
     private var focusSessions: [PersistedFocusSession] = []
     private let taskStorageKey = "flowtime.tasks.v1"
     private let taskListStorageKey = "flowtime.task-lists.v1"
     private let eventStorageKey = "flowtime.events.v1"
     private let categoryStorageKey = "flowtime.categories.v1"
     private let timerStorageKey = "flowtime.timer.v1"
+    private let stopwatchStorageKey = "flowtime.stopwatch.v1"
     private let focusSessionStorageKey = "flowtime.focus-sessions.v1"
 
     init() {
@@ -235,12 +253,25 @@ final class FlowtimeStore: ObservableObject {
 
         restoreFocusSessions()
         restoreTimerState()
+        restoreStopwatchState()
     }
 
     var displayedSeconds: Int { focusSeconds }
-    var isAnyFocusRunning: Bool { runningMode != nil }
+    var isAnyFocusRunning: Bool { timerIsRunning || stopwatchIsRunning }
     var timerHasStarted: Bool { savedTimerSeconds < timerTargetSeconds }
-    var timerExpectedEndDate: Date? { runningMode == .timer ? timerEndDate : nil }
+    var timerExpectedEndDate: Date? { timerIsRunning ? timerEndDate : nil }
+    var stopwatchHasStarted: Bool {
+        stopwatchIsRunning || stopwatchAccumulatedTime > 0 || !stopwatchLaps.isEmpty
+    }
+
+    func stopwatchElapsed(at date: Date = Date()) -> TimeInterval {
+        guard stopwatchIsRunning, let stopwatchStartDate else { return stopwatchAccumulatedTime }
+        return max(0, stopwatchAccumulatedTime + date.timeIntervalSince(stopwatchStartDate))
+    }
+
+    func stopwatchCurrentLapElapsed(at date: Date = Date()) -> TimeInterval {
+        max(0, stopwatchElapsed(at: date) - (stopwatchLaps.last?.totalElapsed ?? 0))
+    }
 
     var focusProgress: Double {
         if focusMode == .timer {
@@ -349,7 +380,7 @@ final class FlowtimeStore: ObservableObject {
         tasks[index] = cleanTask
         if selectedFocusTaskId == cleanTask.id {
             focusLabel = cleanTask.title
-            if runningMode == nil {
+            if !timerIsRunning {
                 timerTargetSeconds = max(60, cleanTask.estimate * 60)
                 savedTimerSeconds = timerTargetSeconds
                 if focusMode == .timer { focusSeconds = savedTimerSeconds }
@@ -392,7 +423,7 @@ final class FlowtimeStore: ObservableObject {
     }
 
     func selectFocusTask(_ id: String?) {
-        stopAllFocus()
+        stopTimerForTaskSelection()
         guard let id, let task = tasks.first(where: { $0.id == id && !$0.done }) else {
             selectedFocusTaskId = nil
             focusLabel = ""
@@ -418,7 +449,7 @@ final class FlowtimeStore: ObservableObject {
         guard timerEndAlert != alert else { return }
         timerEndAlert = alert
         persistTimerState()
-        if runningMode == .timer {
+        if timerIsRunning {
             cancelTimerNotification()
             scheduleTimerNotification()
         } else if timerIsRinging, alert == .silent {
@@ -449,66 +480,100 @@ final class FlowtimeStore: ObservableObject {
     }
 
     func toggleFocus() {
+        if focusMode == .stopwatch {
+            toggleStopwatch()
+            return
+        }
         if timerIsRinging {
             stopTimerAlarm()
             return
         }
-        saveDisplayedFocusTime()
-        if runningMode == focusMode {
-            if focusMode == .timer {
-                reconcileTimer()
-                timerEndDate = nil
-                cancelTimerNotification()
-            }
-            runningMode = nil
+        if timerIsRunning {
+            reconcileTimer()
+            timerEndDate = nil
+            timerIsRunning = false
+            cancelTimerNotification()
         } else {
-            if runningMode == .timer {
-                reconcileTimer()
-                timerEndDate = nil
-                cancelTimerNotification()
-            }
-            if focusMode == .timer && savedTimerSeconds == 0 {
+            if savedTimerSeconds == 0 {
                 savedTimerSeconds = timerTargetSeconds
             }
             if focusLabel.isEmpty { focusLabel = "Focus" }
-            runningMode = focusMode
-            if focusMode == .timer {
-                timerEndDate = Date().addingTimeInterval(TimeInterval(savedTimerSeconds))
-                scheduleTimerNotification()
-            }
+            timerIsRunning = true
+            timerEndDate = Date().addingTimeInterval(TimeInterval(savedTimerSeconds))
+            scheduleTimerNotification()
         }
         refreshSelectedFocusState()
         updateTicker()
         persistTimerState()
+    }
+
+    func toggleStopwatch() {
+        if stopwatchIsRunning {
+            pauseStopwatch()
+        } else {
+            stopwatchStartDate = Date()
+            stopwatchIsRunning = true
+            refreshSelectedFocusState()
+            persistStopwatchState()
+        }
+    }
+
+    func recordStopwatchLap() {
+        guard stopwatchIsRunning else { return }
+        let total = stopwatchElapsed()
+        let lapDuration = max(0, total - (stopwatchLaps.last?.totalElapsed ?? 0))
+        stopwatchLaps.append(
+            StopwatchLap(
+                id: UUID(),
+                number: stopwatchLaps.count + 1,
+                duration: lapDuration,
+                totalElapsed: total
+            )
+        )
+        persistStopwatchState()
+    }
+
+    func resetStopwatch() {
+        guard !stopwatchIsRunning else { return }
+        let completedDuration = Int(stopwatchAccumulatedTime.rounded(.down))
+        if completedDuration > 0 {
+            recordFocusSession(duration: completedDuration)
+        }
+        stopwatchAccumulatedTime = 0
+        stopwatchStartDate = nil
+        stopwatchLaps = []
+        refreshSelectedFocusState()
+        persistStopwatchState()
     }
 
     func pauseFocus() {
-        saveDisplayedFocusTime()
-        if runningMode == focusMode {
-            if focusMode == .timer {
+        if focusMode == .timer {
+            if timerIsRunning {
                 reconcileTimer()
                 timerEndDate = nil
+                timerIsRunning = false
                 cancelTimerNotification()
             }
-            runningMode = nil
+            persistTimerState()
+        } else if stopwatchIsRunning {
+            pauseStopwatch()
         }
         refreshSelectedFocusState()
         updateTicker()
-        persistTimerState()
     }
 
     func resetFocus() {
-        pauseFocus()
         if focusMode == .timer {
+            pauseFocus()
             timerIsRinging = false
             cancelTimerNotification()
             savedTimerSeconds = timerTargetSeconds
             focusSeconds = savedTimerSeconds
+            persistTimerState()
         } else {
-            savedStopwatchSeconds = 0
-            focusSeconds = savedStopwatchSeconds
+            if stopwatchIsRunning { pauseStopwatch() }
+            resetStopwatch()
         }
-        persistTimerState()
     }
 
     func finishFocus() {
@@ -517,9 +582,14 @@ final class FlowtimeStore: ObservableObject {
     }
 
     private func finishFocus(mode: FocusMode, preserveCompletionNotification: Bool = false) {
-        let duration = mode == .timer ? timerTargetSeconds - savedTimerSeconds : savedStopwatchSeconds
-        if runningMode == mode { runningMode = nil }
+        if mode == .stopwatch, stopwatchIsRunning {
+            pauseStopwatch()
+        }
+        let duration = mode == .timer
+            ? timerTargetSeconds - savedTimerSeconds
+            : Int(stopwatchAccumulatedTime.rounded(.down))
         if mode == .timer {
+            timerIsRunning = false
             timerEndDate = nil
             if preserveCompletionNotification {
                 timerIsRinging = false
@@ -533,21 +603,21 @@ final class FlowtimeStore: ObservableObject {
             resetFocusValue(for: mode)
             refreshSelectedFocusState()
             updateTicker()
-            persistTimerState()
+            if mode == .timer { persistTimerState() } else { persistStopwatchState() }
             return
         }
         recordFocusSession(duration: duration)
         resetFocusValue(for: mode)
         refreshSelectedFocusState()
         updateTicker()
-        persistTimerState()
+        if mode == .timer { persistTimerState() } else { persistStopwatchState() }
     }
 
     private func saveDisplayedFocusTime() {
         if focusMode == .timer {
-            savedTimerSeconds = focusSeconds
+            if timerIsRunning { reconcileTimer() }
         } else {
-            savedStopwatchSeconds = focusSeconds
+            reconcileStopwatch()
         }
     }
 
@@ -555,19 +625,21 @@ final class FlowtimeStore: ObservableObject {
         if mode == .timer {
             savedTimerSeconds = timerTargetSeconds
         } else {
-            savedStopwatchSeconds = 0
+            stopwatchAccumulatedTime = 0
+            stopwatchStartDate = nil
+            stopwatchIsRunning = false
+            stopwatchLaps = []
         }
     }
 
     private func refreshSelectedFocusState() {
-        focusSeconds = focusMode == .timer ? savedTimerSeconds : savedStopwatchSeconds
-        isFocusing = runningMode == focusMode
+        focusSeconds = focusMode == .timer ? savedTimerSeconds : Int(stopwatchElapsed().rounded(.down))
+        isFocusing = focusMode == .timer ? timerIsRunning : stopwatchIsRunning
     }
 
-    private func stopAllFocus() {
-        saveDisplayedFocusTime()
-        if runningMode == .timer { reconcileTimer() }
-        runningMode = nil
+    private func stopTimerForTaskSelection() {
+        if timerIsRunning { reconcileTimer() }
+        timerIsRunning = false
         timerEndDate = nil
         timerIsRinging = false
         cancelTimerNotification()
@@ -577,7 +649,7 @@ final class FlowtimeStore: ObservableObject {
     }
 
     private func updateTicker() {
-        if runningMode == nil {
+        if !timerIsRunning {
             ticker?.invalidate()
             ticker = nil
         } else if ticker == nil {
@@ -596,24 +668,20 @@ final class FlowtimeStore: ObservableObject {
     }
 
     private func tick() {
-        guard let runningMode else { return }
-        if runningMode == .timer {
-            reconcileTimer()
-        } else {
-            savedStopwatchSeconds += 1
-            if focusMode == .stopwatch { focusSeconds = savedStopwatchSeconds }
-        }
+        guard timerIsRunning else { return }
+        reconcileTimer()
     }
 
     func reconcileClocks() {
-        if runningMode == .timer { reconcileTimer() }
+        if timerIsRunning { reconcileTimer() }
+        if stopwatchIsRunning { reconcileStopwatch() }
         refreshSelectedFocusState()
         updateTicker()
     }
 
     func stopTimerAlarm() {
-        if runningMode == .timer { reconcileTimer() }
-        runningMode = nil
+        if timerIsRunning { reconcileTimer() }
+        timerIsRunning = false
         timerEndDate = nil
         timerIsRinging = false
         savedTimerSeconds = timerTargetSeconds
@@ -625,7 +693,7 @@ final class FlowtimeStore: ObservableObject {
     }
 
     private func reconcileTimer(now: Date = Date()) {
-        guard runningMode == .timer, let timerEndDate else { return }
+        guard timerIsRunning, let timerEndDate else { return }
         savedTimerSeconds = max(0, Int(ceil(timerEndDate.timeIntervalSince(now))))
         if focusMode == .timer { focusSeconds = savedTimerSeconds }
         if savedTimerSeconds == 0 {
@@ -635,12 +703,28 @@ final class FlowtimeStore: ObservableObject {
         }
     }
 
+    private func reconcileStopwatch(now: Date = Date()) {
+        guard stopwatchIsRunning else { return }
+        if focusMode == .stopwatch {
+            focusSeconds = Int(stopwatchElapsed(at: now).rounded(.down))
+        }
+    }
+
+    private func pauseStopwatch(now: Date = Date()) {
+        guard stopwatchIsRunning else { return }
+        stopwatchAccumulatedTime = stopwatchElapsed(at: now)
+        stopwatchStartDate = nil
+        stopwatchIsRunning = false
+        refreshSelectedFocusState()
+        persistStopwatchState()
+    }
+
     private func persistTimerState() {
         let state = PersistedTimerState(
             targetSeconds: timerTargetSeconds,
             remainingSeconds: savedTimerSeconds,
             endDate: timerEndDate,
-            isRunning: runningMode == .timer,
+            isRunning: timerIsRunning,
             label: focusLabel,
             selectedTaskId: selectedFocusTaskId,
             endAlert: timerEndAlert,
@@ -671,7 +755,7 @@ final class FlowtimeStore: ObservableObject {
             if remaining > 0 {
                 timerEndDate = endDate
                 savedTimerSeconds = min(remaining, timerTargetSeconds)
-                runningMode = .timer
+                timerIsRunning = true
             } else {
                 savedTimerSeconds = 0
                 UserDefaults.standard.removeObject(forKey: timerStorageKey)
@@ -680,7 +764,7 @@ final class FlowtimeStore: ObservableObject {
         }
 
         if wasBlockedByOldRingingState {
-            runningMode = nil
+            timerIsRunning = false
             timerEndDate = nil
             savedTimerSeconds = timerTargetSeconds
             cancelTimerNotification()
@@ -694,6 +778,35 @@ final class FlowtimeStore: ObservableObject {
         if UserDefaults.standard.bool(forKey: TimerNotificationConstants.stopRequestStorageKey) {
             stopTimerAlarm()
         }
+    }
+
+    private func persistStopwatchState() {
+        let state = PersistedStopwatchState(
+            accumulatedTime: stopwatchAccumulatedTime,
+            startDate: stopwatchStartDate,
+            isRunning: stopwatchIsRunning,
+            laps: stopwatchLaps
+        )
+        guard let data = try? JSONEncoder().encode(state) else { return }
+        UserDefaults.standard.set(data, forKey: stopwatchStorageKey)
+    }
+
+    private func restoreStopwatchState() {
+        guard let data = UserDefaults.standard.data(forKey: stopwatchStorageKey),
+              let state = try? JSONDecoder().decode(PersistedStopwatchState.self, from: data) else { return }
+
+        stopwatchAccumulatedTime = max(0, state.accumulatedTime)
+        stopwatchLaps = state.laps
+            .filter { $0.duration >= 0 && $0.totalElapsed >= 0 }
+            .sorted { $0.number < $1.number }
+        if state.isRunning, let startDate = state.startDate {
+            stopwatchStartDate = min(startDate, Date())
+            stopwatchIsRunning = true
+        } else {
+            stopwatchStartDate = nil
+            stopwatchIsRunning = false
+        }
+        refreshSelectedFocusState()
     }
 
     private func scheduleTimerNotification() {
@@ -710,7 +823,7 @@ final class FlowtimeStore: ObservableObject {
                 isAuthorized = (try? await center.requestAuthorization(options: [.alert, .sound])) ?? false
             }
             guard isAuthorized else { return }
-            guard runningMode == .timer,
+            guard timerIsRunning,
                   self.timerEndDate == scheduledEndDate,
                   timerEndAlert == selectedAlert else { return }
 

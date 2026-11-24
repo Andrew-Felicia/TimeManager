@@ -689,87 +689,6 @@ private struct CategoryManagerSheet: View {
     }
 }
 
-private struct FocusSummaryCard: View {
-    @EnvironmentObject private var store: FlowtimeStore
-
-    var body: some View {
-        VStack(spacing: 15) {
-            Text(store.isFocusing ? "FOCUSING NOW" : "FOCUS SESSION")
-                .font(.caption2.bold())
-                .foregroundStyle(.white.opacity(0.6))
-
-            Text(store.focusLabel.isEmpty ? "Untitled focus" : store.focusLabel)
-                .font(.subheadline)
-                .foregroundStyle(.white.opacity(0.8))
-
-            ZStack {
-                Circle()
-                    .stroke(.white.opacity(0.12), lineWidth: 7)
-                Circle()
-                    .trim(from: 0, to: max(0.02, store.focusProgress))
-                    .stroke(Color.accentColor, style: StrokeStyle(lineWidth: 7, lineCap: .round))
-                    .rotationEffect(.degrees(-90))
-                    .animation(.linear(duration: 0.25), value: store.focusProgress)
-                Text(formattedTime(store.displayedSeconds))
-                    .font(.system(size: 42, weight: .semibold, design: .rounded))
-                    .monospacedDigit()
-                    .foregroundStyle(.white)
-            }
-            .frame(width: 172, height: 172)
-
-            HStack(spacing: 24) {
-                Button { store.resetFocus() } label: {
-                    Image(systemName: "arrow.counterclockwise")
-                        .frame(width: 42, height: 42)
-                        .background(.white.opacity(0.1))
-                        .clipShape(Circle())
-                }
-                .accessibilityLabel("Reset focus session")
-
-                Button { store.toggleFocus() } label: {
-                    Image(systemName: store.isFocusing ? "pause.fill" : "play.fill")
-                        .font(.title3)
-                        .frame(width: 58, height: 58)
-                        .background(.white)
-                        .foregroundStyle(.black)
-                        .clipShape(Circle())
-                }
-                .accessibilityLabel(store.isFocusing ? "Pause focus session" : "Start focus session")
-
-                Button { store.finishFocus() } label: {
-                    Image(systemName: "stop.fill")
-                        .frame(width: 42, height: 42)
-                        .background(.white.opacity(0.1))
-                        .clipShape(Circle())
-                }
-                .accessibilityLabel("Finish and save focus session")
-            }
-            .foregroundStyle(.white)
-
-            Text(store.isFocusing ? "Tap pause to take a break" : "Your progress is saved when you stop")
-                .font(.caption2)
-                .foregroundStyle(.white.opacity(0.45))
-        }
-        .frame(maxWidth: .infinity)
-        .padding(22)
-        .background(
-            LinearGradient(
-                colors: [Color(red: 0.12, green: 0.18, blue: 0.29), Color(red: 0.05, green: 0.09, blue: 0.16)],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-        )
-        .clipShape(RoundedRectangle(cornerRadius: 24))
-    }
-
-    private func formattedTime(_ seconds: Int) -> String {
-        if seconds >= 3_600 {
-            return String(format: "%d:%02d:%02d", seconds / 3_600, (seconds % 3_600) / 60, seconds % 60)
-        }
-        return String(format: "%02d:%02d", seconds / 60, seconds % 60)
-    }
-}
-
 private struct TaskCell: View {
     @EnvironmentObject private var store: FlowtimeStore
     let task: FlowTask
@@ -1167,31 +1086,26 @@ private struct FocusView: View {
         NavigationStack {
             ZStack {
                 Color.black.ignoresSafeArea()
-                ScrollView {
-                    VStack(spacing: 22) {
-                        Picker("Focus mode", selection: Binding(
-                            get: { store.focusMode },
-                            set: { store.setFocusMode($0) }
-                        )) {
-                            ForEach(FocusMode.allCases) { mode in Text(mode.rawValue).tag(mode) }
-                        }
-                        .pickerStyle(.segmented)
-                        .padding(.horizontal)
-
-                        if store.focusMode == .timer {
-                            ClockTimerView()
-                        } else {
-                            stopwatchTaskPicker
-                            FocusSummaryCard()
-
-                            HStack(spacing: 12) {
-                                StatTile(value: formattedDuration(store.weeklyFocusSeconds), label: "This week")
-                                StatTile(value: "\(store.sessionCount)", label: "Sessions")
-                            }
-                            .padding(.horizontal)
-                        }
+                VStack(spacing: 0) {
+                    Picker("Focus mode", selection: Binding(
+                        get: { store.focusMode },
+                        set: { store.setFocusMode($0) }
+                    )) {
+                        ForEach(FocusMode.allCases) { mode in Text(mode.rawValue).tag(mode) }
                     }
-                    .padding(.vertical)
+                    .pickerStyle(.segmented)
+                    .padding(.horizontal)
+                    .padding(.top, 8)
+                    .padding(.bottom, 6)
+
+                    if store.focusMode == .timer {
+                        ScrollView {
+                            ClockTimerView()
+                                .padding(.vertical, 16)
+                        }
+                    } else {
+                        ClockStopwatchView()
+                    }
                 }
             }
             .navigationTitle(store.focusMode == .timer ? "Timers" : "Stopwatch")
@@ -1200,38 +1114,316 @@ private struct FocusView: View {
         }
         .environment(\.colorScheme, .dark)
     }
+}
 
-    private var activeTasks: [FlowTask] {
-        store.tasks.filter { !$0.done }.sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
-    }
+private struct ClockStopwatchView: View {
+    @EnvironmentObject private var store: FlowtimeStore
+    @AppStorage("flowtime.stopwatch.selected-face") private var selectedFace = 0
+    @State private var feedbackTrigger = 0
 
-    private var stopwatchTaskPicker: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "checkmark.circle")
-                .foregroundStyle(Color.accentColor)
-            Picker("Focus task", selection: Binding(
-                get: { store.selectedFocusTaskId },
-                set: { store.selectFocusTask($0) }
-            )) {
-                Text("No task (general focus)").tag(String?.none)
-                ForEach(activeTasks) { task in
-                    Text("\(task.title) · \(task.estimate) min").tag(Optional(task.id))
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: !store.stopwatchIsRunning)) { context in
+            GeometryReader { geometry in
+                VStack(spacing: 0) {
+                    TabView(selection: $selectedFace) {
+                        StopwatchDigitalFace(elapsed: store.stopwatchElapsed(at: context.date))
+                            .tag(0)
+                        StopwatchAnalogFace(elapsed: store.stopwatchElapsed(at: context.date))
+                            .tag(1)
+                    }
+                    .tabViewStyle(.page(indexDisplayMode: .never))
+                    .frame(height: min(300, max(238, geometry.size.height * 0.46)))
+
+                    HStack(spacing: 7) {
+                        ForEach(0..<2, id: \.self) { page in
+                            Circle()
+                                .fill(page == selectedFace ? Color.white : Color.white.opacity(0.3))
+                                .frame(width: 6, height: 6)
+                        }
+                    }
+                    .frame(height: 20)
+                    .accessibilityHidden(true)
+
+                    stopwatchControls
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 9)
+
+                    Divider()
+                        .overlay(Color.white.opacity(0.18))
+
+                    lapList(at: context.date)
                 }
             }
-            .pickerStyle(.menu)
-            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(.horizontal, 12)
-        .frame(height: 48)
-        .background(Color(white: 0.11))
-        .clipShape(RoundedRectangle(cornerRadius: 12))
-        .padding(.horizontal)
-        .disabled(store.isAnyFocusRunning || activeTasks.isEmpty)
+        .sensoryFeedback(.selection, trigger: feedbackTrigger)
     }
 
-    private func formattedDuration(_ seconds: Int) -> String {
-        "\(seconds / 3_600)h \((seconds % 3_600) / 60)m"
+    private var stopwatchControls: some View {
+        HStack {
+            StopwatchControlButton(
+                title: leftControlTitle,
+                role: .neutral,
+                isEnabled: store.stopwatchIsRunning || store.stopwatchHasStarted
+            ) {
+                if store.stopwatchIsRunning {
+                    store.recordStopwatchLap()
+                } else {
+                    store.resetStopwatch()
+                }
+                feedbackTrigger += 1
+            }
+
+            Spacer()
+
+            StopwatchControlButton(
+                title: store.stopwatchIsRunning ? "Stop" : "Start",
+                role: store.stopwatchIsRunning ? .stop : .start,
+                isEnabled: true
+            ) {
+                store.toggleStopwatch()
+                feedbackTrigger += 1
+            }
+        }
     }
+
+    private var leftControlTitle: String {
+        !store.stopwatchIsRunning && store.stopwatchHasStarted ? "Reset" : "Lap"
+    }
+
+    private func lapList(at date: Date) -> some View {
+        ScrollView {
+            LazyVStack(spacing: 0) {
+                if store.stopwatchHasStarted {
+                    StopwatchLapRow(
+                        number: store.stopwatchLaps.count + 1,
+                        duration: store.stopwatchCurrentLapElapsed(at: date),
+                        color: .white
+                    )
+
+                    ForEach(Array(store.stopwatchLaps.reversed())) { lap in
+                        StopwatchLapRow(
+                            number: lap.number,
+                            duration: lap.duration,
+                            color: color(for: lap)
+                        )
+                    }
+                }
+            }
+        }
+        .scrollIndicators(.hidden)
+    }
+
+    private func color(for lap: StopwatchLap) -> Color {
+        guard store.stopwatchLaps.count > 1,
+              let fastest = store.stopwatchLaps.min(by: { $0.duration < $1.duration }),
+              let slowest = store.stopwatchLaps.max(by: { $0.duration < $1.duration }),
+              abs(fastest.duration - slowest.duration) > 0.000_5 else { return .white }
+        if lap.id == fastest.id { return .green }
+        if lap.id == slowest.id { return .red }
+        return .white
+    }
+}
+
+private struct StopwatchDigitalFace: View {
+    let elapsed: TimeInterval
+
+    var body: some View {
+        Text(stopwatchTime(elapsed))
+            .font(.system(size: elapsed >= 3_600 ? 52 : 72, weight: .thin, design: .default))
+            .monospacedDigit()
+            .foregroundStyle(.white)
+            .minimumScaleFactor(0.62)
+            .lineLimit(1)
+            .padding(.horizontal, 12)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .accessibilityLabel("Elapsed time \(stopwatchSpokenTime(elapsed))")
+    }
+}
+
+private struct StopwatchAnalogFace: View {
+    let elapsed: TimeInterval
+
+    var body: some View {
+        StopwatchAnalogDial(elapsed: elapsed)
+            .padding(.vertical, 6)
+            .accessibilityLabel("Analog stopwatch, elapsed time \(stopwatchSpokenTime(elapsed))")
+    }
+}
+
+private struct StopwatchAnalogDial: View {
+    let elapsed: TimeInterval
+    private let labels = [60, 10, 20, 30, 40, 50]
+
+    var body: some View {
+        GeometryReader { proxy in
+            let diameter = min(proxy.size.width, proxy.size.height)
+            let radius = diameter / 2
+            let center = CGPoint(x: diameter / 2, y: diameter / 2)
+
+            ZStack {
+                Circle()
+                    .stroke(Color.white.opacity(0.88), lineWidth: 1.5)
+
+                ForEach(0..<60, id: \.self) { tick in
+                    Capsule()
+                        .fill(Color.white.opacity(tick.isMultiple(of: 5) ? 0.95 : 0.55))
+                        .frame(width: tick.isMultiple(of: 5) ? 2 : 1, height: tick.isMultiple(of: 5) ? 11 : 6)
+                        .offset(y: -radius + 10)
+                        .rotationEffect(.degrees(Double(tick) * 6))
+                }
+
+                ForEach(labels, id: \.self) { value in
+                    let angle = Angle.degrees(Double(value == 60 ? 0 : value) * 6 - 90)
+                    Text("\(value)")
+                        .font(.system(size: 11, weight: .medium, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundStyle(.white.opacity(0.9))
+                        .position(
+                            x: center.x + cos(angle.radians) * (radius - 27),
+                            y: center.y + sin(angle.radians) * (radius - 27)
+                        )
+                }
+
+                minuteSubdial
+                    .frame(width: diameter * 0.25, height: diameter * 0.25)
+                    .offset(y: -diameter * 0.2)
+
+                Capsule()
+                    .fill(Color.orange)
+                    .frame(width: 2.5, height: radius - 23)
+                    .offset(y: -(radius - 23) / 2)
+                    .rotationEffect(.degrees(elapsed.truncatingRemainder(dividingBy: 60) * 6))
+
+                Circle()
+                    .fill(Color.orange)
+                    .frame(width: 9, height: 9)
+                Circle()
+                    .fill(Color.black)
+                    .frame(width: 3, height: 3)
+            }
+            .frame(width: diameter, height: diameter)
+            .position(x: proxy.size.width / 2, y: proxy.size.height / 2)
+        }
+        .aspectRatio(1, contentMode: .fit)
+    }
+
+    private var minuteSubdial: some View {
+        ZStack {
+            Circle()
+                .fill(Color.black)
+                .overlay(Circle().stroke(Color.white.opacity(0.7), lineWidth: 1))
+            ForEach(0..<12, id: \.self) { tick in
+                Capsule()
+                    .fill(Color.white.opacity(0.75))
+                    .frame(width: 1, height: tick.isMultiple(of: 3) ? 5 : 3)
+                    .offset(y: -25)
+                    .rotationEffect(.degrees(Double(tick) * 30))
+            }
+            Capsule()
+                .fill(Color.orange)
+                .frame(width: 1.5, height: 23)
+                .offset(y: -11.5)
+                .rotationEffect(.degrees(elapsed.truncatingRemainder(dividingBy: 1_800) / 1_800 * 360))
+            Circle()
+                .fill(Color.orange)
+                .frame(width: 5, height: 5)
+        }
+    }
+}
+
+private enum StopwatchControlRole {
+    case neutral
+    case start
+    case stop
+}
+
+private struct StopwatchControlButton: View {
+    let title: String
+    let role: StopwatchControlRole
+    let isEnabled: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 17, weight: .regular))
+                .foregroundStyle(foregroundColor)
+                .frame(width: 78, height: 78)
+                .background(fillColor)
+                .clipShape(Circle())
+                .overlay {
+                    Circle()
+                        .stroke(Color.black, lineWidth: 2)
+                        .padding(3)
+                }
+        }
+        .buttonStyle(.plain)
+        .disabled(!isEnabled)
+        .accessibilityLabel(title)
+    }
+
+    private var foregroundColor: Color {
+        guard isEnabled else { return Color.white.opacity(0.32) }
+        switch role {
+        case .neutral: return .white
+        case .start: return .green
+        case .stop: return .red
+        }
+    }
+
+    private var fillColor: Color {
+        guard isEnabled else { return Color(white: 0.12) }
+        switch role {
+        case .neutral: return Color(white: 0.2)
+        case .start: return Color.green.opacity(0.2)
+        case .stop: return Color.red.opacity(0.2)
+        }
+    }
+}
+
+private struct StopwatchLapRow: View {
+    let number: Int
+    let duration: TimeInterval
+    let color: Color
+
+    var body: some View {
+        HStack {
+            Text("Lap \(number)")
+            Spacer()
+            Text(stopwatchTime(duration))
+                .monospacedDigit()
+        }
+        .font(.system(size: 17, weight: .regular))
+        .foregroundStyle(color)
+        .padding(.horizontal, 20)
+        .frame(height: 48)
+        .overlay(alignment: .bottom) {
+            Divider()
+                .overlay(Color.white.opacity(0.15))
+                .padding(.leading, 20)
+        }
+    }
+}
+
+private func stopwatchTime(_ interval: TimeInterval) -> String {
+    let hundredthsTotal = max(0, Int((interval * 100).rounded(.down)))
+    let hundredths = hundredthsTotal % 100
+    let totalSeconds = hundredthsTotal / 100
+    let seconds = totalSeconds % 60
+    let totalMinutes = totalSeconds / 60
+    if totalMinutes >= 60 {
+        return String(format: "%d:%02d:%02d.%02d", totalMinutes / 60, totalMinutes % 60, seconds, hundredths)
+    }
+    return String(format: "%02d:%02d.%02d", totalMinutes, seconds, hundredths)
+}
+
+private func stopwatchSpokenTime(_ interval: TimeInterval) -> String {
+    let totalSeconds = max(0, Int(interval.rounded(.down)))
+    let hours = totalSeconds / 3_600
+    let minutes = (totalSeconds % 3_600) / 60
+    let seconds = totalSeconds % 60
+    if hours > 0 { return "\(hours) hours, \(minutes) minutes, \(seconds) seconds" }
+    return "\(minutes) minutes, \(seconds) seconds"
 }
 
 private struct ClockTimerView: View {
