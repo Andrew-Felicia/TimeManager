@@ -157,6 +157,7 @@ final class FlowtimeAppDelegate: NSObject, UIApplicationDelegate, UNUserNotifica
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
+        UserDefaults.standard.removeObject(forKey: "flowtime.language")
         TimerAlarmSound.installIfNeeded()
         let center = UNUserNotificationCenter.current()
         center.delegate = self

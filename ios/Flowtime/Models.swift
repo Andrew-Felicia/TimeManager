@@ -34,7 +34,7 @@ struct FlowTask: Identifiable, Codable, Hashable {
         self.done = done
         self.category = category
         self.priority = priority
-        self.scheduledAt = scheduledAt
+        self.scheduledAt = Calendar.current.startOfDay(for: scheduledAt)
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -49,7 +49,8 @@ struct FlowTask: Identifiable, Codable, Hashable {
         done = try container.decodeIfPresent(Bool.self, forKey: .done) ?? false
         category = try container.decodeIfPresent(String.self, forKey: .category)
         priority = try container.decodeIfPresent(TaskPriority.self, forKey: .priority) ?? .medium
-        scheduledAt = try container.decodeIfPresent(Date.self, forKey: .scheduledAt) ?? Date()
+        let savedSchedule = try container.decodeIfPresent(Date.self, forKey: .scheduledAt) ?? Date()
+        scheduledAt = Calendar.current.startOfDay(for: savedSchedule)
     }
 }
 
@@ -262,7 +263,7 @@ final class FlowtimeStore: ObservableObject {
             ]
         }
 
-        // Save migration defaults so priority and scheduled time stay stable for older tasks.
+        // Save migration defaults so priority and scheduled day stay stable for older tasks.
         persistTasks()
         restoreFocusSessions()
         restoreTimerState()
@@ -357,7 +358,7 @@ final class FlowtimeStore: ObservableObject {
             estimate: min(1_439, max(1, estimate)),
             category: normalizedTaskCategory(category),
             priority: priority,
-            scheduledAt: scheduledAt
+            scheduledAt: Calendar.current.startOfDay(for: scheduledAt)
         )
         tasks = [task] + tasks
         timerRemainingByTask[task.id] = task.estimate * 60
@@ -372,6 +373,7 @@ final class FlowtimeStore: ObservableObject {
         cleanTask.title = task.title.trimmingCharacters(in: .whitespacesAndNewlines)
         cleanTask.estimate = min(1_439, max(1, task.estimate))
         cleanTask.category = normalizedTaskCategory(task.category)
+        cleanTask.scheduledAt = Calendar.current.startOfDay(for: task.scheduledAt)
         guard !cleanTask.title.isEmpty else { return }
         var updatedTasks = tasks
         updatedTasks[index] = cleanTask

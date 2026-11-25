@@ -4,6 +4,24 @@ import UIKit
 import UserNotifications
 import AVFoundation
 
+private let appEnglishLocale = Locale(identifier: "en_US")
+
+private func englishDateString(_ date: Date, _ format: Date.FormatStyle) -> String {
+    date.formatted(format.locale(appEnglishLocale))
+}
+
+private func englishDateString(
+    _ date: Date,
+    dateStyle: DateFormatter.Style,
+    timeStyle: DateFormatter.Style
+) -> String {
+    let formatter = DateFormatter()
+    formatter.locale = appEnglishLocale
+    formatter.dateStyle = dateStyle
+    formatter.timeStyle = timeStyle
+    return formatter.string(from: date)
+}
+
 private enum AppTheme: String, CaseIterable, Identifiable {
     case light = "Light"
     case dark = "Dark"
@@ -39,6 +57,7 @@ struct ContentView: View {
         .toolbarBackground(.visible, for: .tabBar)
         .background(Color(.systemBackground).ignoresSafeArea())
         .preferredColorScheme(appTheme.colorScheme)
+        .environment(\.locale, appEnglishLocale)
     }
 }
 
@@ -71,11 +90,17 @@ private func taskPriorityColor(_ priority: TaskPriority) -> Color {
     }
 }
 
-private func taskPriorityIcon(_ priority: TaskPriority) -> String {
-    switch priority {
-    case .low: return "arrow.down.circle.fill"
-    case .medium: return "minus.circle.fill"
-    case .high: return "exclamationmark.circle.fill"
+private struct TaskPriorityLabel: View {
+    let priority: TaskPriority
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Circle()
+                .fill(taskPriorityColor(priority))
+                .frame(width: 8, height: 8)
+                .accessibilityHidden(true)
+            Text(priority.rawValue)
+        }
     }
 }
 
@@ -182,10 +207,10 @@ private struct TodayView: View {
             withAnimation(.easeOut(duration: 0.18)) { store.selectedDate = date }
         } label: {
             VStack(spacing: 7) {
-                Text(date.formatted(.dateTime.weekday(.narrow)))
+                Text(englishDateString(date, .dateTime.weekday(.narrow)))
                     .font(.caption2)
                     .foregroundStyle(.secondary)
-                Text(date.formatted(.dateTime.day()))
+                Text(englishDateString(date, .dateTime.day()))
                     .font(.subheadline.bold())
                     .frame(width: 38, height: 38)
                     .background(isSelected(date) ? Color.accentColor : .clear)
@@ -196,7 +221,7 @@ private struct TodayView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(date.formatted(date: .complete, time: .omitted))
+        .accessibilityLabel(englishDateString(date, dateStyle: .full, timeStyle: .none))
         .accessibilityAddTraits(isSelected(date) ? .isSelected : [])
     }
 
@@ -207,14 +232,14 @@ private struct TodayView: View {
     private var periodTitle: String {
         switch displayMode {
         case .year:
-            return store.selectedDate.formatted(.dateTime.year())
+            return englishDateString(store.selectedDate, .dateTime.year())
         case .month:
-            return store.selectedDate.formatted(.dateTime.month(.wide).year())
+            return englishDateString(store.selectedDate, .dateTime.month(.wide).year())
         case .week:
             guard let first = weekDates.first, let last = weekDates.last else { return "Week" }
-            return "\(first.formatted(.dateTime.month(.abbreviated).day())) – \(last.formatted(.dateTime.month(.abbreviated).day()))"
+            return "\(englishDateString(first, .dateTime.month(.abbreviated).day())) – \(englishDateString(last, .dateTime.month(.abbreviated).day()))"
         case .day:
-            return store.selectedDate.formatted(.dateTime.month(.wide).day().year())
+            return englishDateString(store.selectedDate, .dateTime.month(.wide).day().year())
         }
     }
 
@@ -245,9 +270,9 @@ private struct WeekCalendarView: View {
                 VStack(alignment: .leading, spacing: 9) {
                     Button { onSelectDay(date) } label: {
                         HStack {
-                            Text(date.formatted(.dateTime.weekday(.wide)))
+                            Text(englishDateString(date, .dateTime.weekday(.wide)))
                                 .font(.headline)
-                            Text(date.formatted(.dateTime.month(.abbreviated).day()))
+                            Text(englishDateString(date, .dateTime.month(.abbreviated).day()))
                                 .foregroundStyle(.secondary)
                             Spacer()
                             Text("\(dayEvents.count)")
@@ -265,7 +290,9 @@ private struct WeekCalendarView: View {
                         ForEach(dayEvents) { event in
                             Button { onSelectEvent(event) } label: {
                                 HStack(spacing: 10) {
-                                    Text(event.isAllDay ? "All day" : event.startsAt.formatted(date: .omitted, time: .shortened))
+                                    Text(event.isAllDay
+                                        ? "All day"
+                                        : englishDateString(event.startsAt, dateStyle: .none, timeStyle: .short))
                                         .font(.caption.monospacedDigit())
                                         .foregroundStyle(.secondary)
                                         .frame(width: 68, alignment: .leading)
@@ -319,7 +346,7 @@ private struct MonthCalendarView: View {
                     if let day {
                         Button { onSelectDay(day) } label: {
                             VStack(spacing: 5) {
-                                Text(day.formatted(.dateTime.day()))
+                                Text(englishDateString(day, .dateTime.day()))
                                     .font(.subheadline.weight(Calendar.current.isDateInToday(day) ? .bold : .regular))
                                     .frame(width: 32, height: 32)
                                     .background(Calendar.current.isDateInToday(day) ? Color.accentColor : .clear)
@@ -347,7 +374,9 @@ private struct MonthCalendarView: View {
     }
 
     private var weekdaySymbols: [String] {
-        let symbols = Calendar.current.veryShortStandaloneWeekdaySymbols
+        let formatter = DateFormatter()
+        formatter.locale = appEnglishLocale
+        let symbols = formatter.veryShortStandaloneWeekdaySymbols ?? ["S", "M", "T", "W", "T", "F", "S"]
         let first = Calendar.current.firstWeekday - 1
         return Array(symbols[first...] + symbols[..<first])
     }
@@ -380,7 +409,7 @@ private struct YearCalendarView: View {
                 Button { onSelectMonth(month) } label: {
                     VStack(alignment: .leading, spacing: 12) {
                         HStack {
-                            Text(month.formatted(.dateTime.month(.wide)))
+                            Text(englishDateString(month, .dateTime.month(.wide)))
                                 .font(.headline)
                             Spacer()
                             Image(systemName: "chevron.right")
@@ -430,7 +459,7 @@ private struct DayCalendarView: View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(date.formatted(.dateTime.weekday(.wide).month(.abbreviated).day()))
+                    Text(englishDateString(date, .dateTime.weekday(.wide).month(.abbreviated).day()))
                         .font(.title3.bold())
                     Text(events.isEmpty ? "No events scheduled" : "\(events.count) event\(events.count == 1 ? "" : "s")")
                         .font(.caption)
@@ -547,7 +576,7 @@ private struct EventBlock: View {
                     if event.isAllDay {
                         Text("All day")
                     } else {
-                        Text(event.startsAt.formatted(date: .omitted, time: .shortened))
+                        Text(englishDateString(event.startsAt, dateStyle: .none, timeStyle: .short))
                     }
                 }
                     .font(.caption2)
@@ -642,10 +671,10 @@ private struct EventDetailSheet: View {
             List {
                 Section {
                     if event.isAllDay {
-                        Label(event.startsAt.formatted(date: .complete, time: .omitted), systemImage: "calendar")
+                        Label(englishDateString(event.startsAt, dateStyle: .full, timeStyle: .none), systemImage: "calendar")
                         Label("All day", systemImage: "sun.max")
                     } else {
-                        Label(event.startsAt.formatted(date: .complete, time: .shortened), systemImage: "clock")
+                        Label(englishDateString(event.startsAt, dateStyle: .full, timeStyle: .short), systemImage: "clock")
                         Label("\(event.durationMinutes) minutes", systemImage: "hourglass")
                     }
                     Label(event.category, systemImage: "tag")
@@ -746,8 +775,7 @@ private struct TaskCell: View {
 
                 HStack(spacing: 12) {
                     Label(formattedTaskEstimate(task.estimate), systemImage: "clock")
-                    Label(task.priority.rawValue, systemImage: taskPriorityIcon(task.priority))
-                        .foregroundStyle(taskPriorityColor(task.priority))
+                    TaskPriorityLabel(priority: task.priority)
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -911,7 +939,7 @@ private struct TaskEditorSheet: View {
     @State private var estimateMinutes: Int
     @State private var selectedCategory: String?
     @State private var priority: TaskPriority
-    @State private var scheduledAt: Date
+    @State private var scheduledDate: Date
     @State private var showingCategories = false
     @FocusState private var titleFocused: Bool
     private let presets = [5, 15, 20, 25, 30, 60, 120]
@@ -923,7 +951,7 @@ private struct TaskEditorSheet: View {
         _estimateMinutes = State(initialValue: min(1_439, max(1, initialEstimate)))
         _selectedCategory = State(initialValue: task?.category)
         _priority = State(initialValue: task?.priority ?? .medium)
-        _scheduledAt = State(initialValue: task?.scheduledAt ?? Date())
+        _scheduledDate = State(initialValue: task?.scheduledAt ?? Date())
     }
 
     var body: some View {
@@ -942,9 +970,9 @@ private struct TaskEditorSheet: View {
 
                 Section("When") {
                     DatePicker(
-                        "Scheduled time",
-                        selection: $scheduledAt,
-                        displayedComponents: [.date, .hourAndMinute]
+                        "Date",
+                        selection: $scheduledDate,
+                        displayedComponents: .date
                     )
                 }
 
@@ -1053,7 +1081,7 @@ private struct TaskEditorSheet: View {
             updated.estimate = estimateMinutes
             updated.category = selectedCategory
             updated.priority = priority
-            updated.scheduledAt = scheduledAt
+            updated.scheduledAt = scheduledDate
             store.updateTask(updated)
         } else {
             store.addTask(
@@ -1061,7 +1089,7 @@ private struct TaskEditorSheet: View {
                 estimate: estimateMinutes,
                 category: selectedCategory,
                 priority: priority,
-                scheduledAt: scheduledAt
+                scheduledAt: scheduledDate
             )
         }
         dismiss()
@@ -1078,7 +1106,10 @@ private struct TaskPrioritySelector: View {
                     selection = priority
                 } label: {
                     HStack(spacing: 5) {
-                        Image(systemName: taskPriorityIcon(priority))
+                        Circle()
+                            .fill(taskPriorityColor(priority))
+                            .frame(width: 9, height: 9)
+                            .accessibilityHidden(true)
                         Text(priority.rawValue)
                             .fontWeight(.semibold)
                     }
@@ -1118,9 +1149,10 @@ private func formattedTaskEstimate(_ minutes: Int) -> String {
 
 private func formattedTaskSchedule(_ date: Date) -> String {
     let formatter = DateFormatter()
+    formatter.locale = appEnglishLocale
     formatter.doesRelativeDateFormatting = true
     formatter.dateStyle = .medium
-    formatter.timeStyle = .short
+    formatter.timeStyle = .none
     return formatter.string(from: date)
 }
 
@@ -1212,8 +1244,7 @@ private struct TaskTimerCard: View {
                     HStack(spacing: 10) {
                         Label(task.category ?? "Other", systemImage: "tag")
                             .foregroundStyle(flowCategoryColor(task.category ?? "Other"))
-                        Label(task.priority.rawValue, systemImage: taskPriorityIcon(task.priority))
-                            .foregroundStyle(taskPriorityColor(task.priority))
+                        TaskPriorityLabel(priority: task.priority)
                     }
                     .font(.caption)
                 }
@@ -1786,6 +1817,7 @@ private struct InsightsView: View {
 
     private func activityAxisLabel(for date: Date) -> String {
         let formatter = DateFormatter()
+        formatter.locale = appEnglishLocale
         switch range {
         case .day: formatter.dateFormat = "ha"
         case .week: formatter.dateFormat = "EEE"
@@ -1876,7 +1908,7 @@ private struct FocusHistoryView: View {
                                                 .foregroundStyle(.primary)
                                         }
 
-                                        Text(session.completedAt.formatted(date: .abbreviated, time: .shortened))
+                                        Text(englishDateString(session.completedAt, dateStyle: .medium, timeStyle: .short))
                                             .font(.caption)
                                             .foregroundStyle(.secondary)
                                     }
@@ -1920,7 +1952,7 @@ private struct FocusSessionEditorView: View {
         Form {
             Section {
                 LabeledContent("Completed") {
-                    Text(completedAt.formatted(date: .abbreviated, time: .shortened))
+                    Text(englishDateString(completedAt, dateStyle: .medium, timeStyle: .short))
                         .foregroundStyle(.secondary)
                 }
             }
