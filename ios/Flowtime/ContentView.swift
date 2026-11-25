@@ -3,6 +3,7 @@ import Charts
 import UIKit
 import UserNotifications
 import AVFoundation
+import UniformTypeIdentifiers
 
 private let appEnglishLocale = Locale(identifier: "en_US")
 
@@ -20,6 +21,23 @@ private func englishDateString(
     formatter.dateStyle = dateStyle
     formatter.timeStyle = timeStyle
     return formatter.string(from: date)
+}
+
+private struct FlowtimeExportDocument: FileDocument {
+    static var readableContentTypes: [UTType] { [.json] }
+    var data: Data
+
+    init(data: Data) {
+        self.data = data
+    }
+
+    init(configuration: ReadConfiguration) throws {
+        data = configuration.file.regularFileContents ?? Data()
+    }
+
+    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
+        FileWrapper(regularFileWithContents: data)
+    }
 }
 
 private enum AppTheme: String, CaseIterable, Identifiable {
@@ -87,6 +105,22 @@ private func taskPriorityColor(_ priority: TaskPriority) -> Color {
     case .low: return .blue
     case .medium: return .orange
     case .high: return .red
+    }
+}
+
+private struct EventDateIndicator: View {
+    let events: [FlowEvent]
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(Array(events.prefix(3))) { event in
+                Capsule()
+                    .fill(flowCategoryColor(event.category))
+                    .frame(width: 8, height: 3)
+            }
+        }
+        .frame(height: 4)
+        .accessibilityHidden(true)
     }
 }
 
@@ -216,6 +250,7 @@ private struct TodayView: View {
                     .background(isSelected(date) ? Color.accentColor : .clear)
                     .foregroundStyle(isSelected(date) ? .white : .primary)
                     .clipShape(Circle())
+                EventDateIndicator(events: store.events(on: date))
             }
             .frame(maxWidth: .infinity)
             .contentShape(Rectangle())
@@ -265,7 +300,7 @@ private struct WeekCalendarView: View {
     var body: some View {
         VStack(spacing: 0) {
             ForEach(dates, id: \.self) { date in
-                let dayEvents = events.filter { Calendar.current.isDate($0.startsAt, inSameDayAs: date) }
+                let dayEvents = events.filter { $0.occurs(on: date) }
                     .sorted { $0.startsAt < $1.startsAt }
                 VStack(alignment: .leading, spacing: 9) {
                     Button { onSelectDay(date) } label: {
@@ -352,12 +387,7 @@ private struct MonthCalendarView: View {
                                     .background(Calendar.current.isDateInToday(day) ? Color.accentColor : .clear)
                                     .foregroundStyle(Calendar.current.isDateInToday(day) ? .white : .primary)
                                     .clipShape(Circle())
-                                HStack(spacing: 2) {
-                                    ForEach(Array(eventsOn(day).prefix(3))) { event in
-                                        Circle().fill(eventColor(event)).frame(width: 4, height: 4)
-                                    }
-                                }
-                                .frame(height: 5)
+                                EventDateIndicator(events: eventsOn(day))
                             }
                             .frame(maxWidth: .infinity, minHeight: 48)
                         }
@@ -382,12 +412,9 @@ private struct MonthCalendarView: View {
     }
 
     private func eventsOn(_ day: Date) -> [FlowEvent] {
-        events.filter { Calendar.current.isDate($0.startsAt, inSameDayAs: day) }
+        events.filter { $0.occurs(on: day) }
     }
 
-    private func eventColor(_ event: FlowEvent) -> Color {
-        flowCategoryColor(event.category)
-    }
 }
 
 private struct YearCalendarView: View {
@@ -439,8 +466,9 @@ private struct YearCalendarView: View {
     }
 
     private func eventCount(in month: Date) -> Int {
-        events.filter {
-            Calendar.current.isDate($0.startsAt, equalTo: month, toGranularity: .month)
+        guard let monthInterval = Calendar.current.dateInterval(of: .month, for: month) else { return 0 }
+        return events.filter { event in
+            event.startsAt < monthInterval.end && event.endsAt > monthInterval.start
         }.count
     }
 }
@@ -569,14 +597,14 @@ private struct EventBlock: View {
                 .fill(color)
                 .frame(width: 4)
             VStack(alignment: .leading, spacing: 3) {
-                Text(event.title)
+                Text(event.isAllDay ? event.category : event.title)
                     .font(.subheadline.bold())
                     .lineLimit(1)
                 Group {
                     if event.isAllDay {
                         Text("All day")
                     } else {
-                        Text(englishDateString(event.startsAt, dateStyle: .none, timeStyle: .short))
+                        Text("\(englishDateString(event.startsAt, dateStyle: .none, timeStyle: .short)) – \(englishDateString(event.endsAt, dateStyle: .none, timeStyle: .short))")
                     }
                 }
                     .font(.caption2)
@@ -599,36 +627,22 @@ private struct EventBlock: View {
 private struct NewEventSheet: View {
     @EnvironmentObject private var store: FlowtimeStore
     @Environment(\.dismiss) private var dismiss
-    let date: Date
-    @State private var title = ""
-    @State private var startTime: Date
-    @State private var duration = 60
+    @State private var startDate: Date
+    @State private var endDate: Date
     @State private var category = "Work"
-    @State private var isAllDay = false
-    @FocusState private var titleFocused: Bool
 
     init(date: Date) {
-        self.date = date
-        let defaultTime = Calendar.current.date(bySettingHour: 9, minute: 0, second: 0, of: date) ?? date
-        _startTime = State(initialValue: defaultTime)
+        let selectedDay = Calendar.current.startOfDay(for: date)
+        _startDate = State(initialValue: selectedDay)
+        _endDate = State(initialValue: selectedDay)
     }
 
     var body: some View {
         NavigationStack {
             Form {
-                Section("Event") {
-                    TextField("Event title", text: $title)
-                        .focused($titleFocused)
-                    DatePicker("Date", selection: Binding(
-                        get: { date },
-                        set: { _ in }
-                    ), displayedComponents: .date)
-                    .disabled(true)
-                    Toggle("All-day", isOn: $isAllDay)
-                    if !isAllDay {
-                        DatePicker("Starts", selection: $startTime, displayedComponents: .hourAndMinute)
-                        Stepper("Duration: \(duration) minutes", value: $duration, in: 15...480, step: 15)
-                    }
+                Section {
+                    DatePicker("Starts date", selection: $startDate, displayedComponents: .date)
+                    DatePicker("Ends date", selection: $endDate, in: startDate..., displayedComponents: .date)
                     Picker("Category", selection: $category) {
                         ForEach(store.categories, id: \.self) { Text($0) }
                     }
@@ -641,21 +655,21 @@ private struct NewEventSheet: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Add") {
                         store.addEvent(
-                            title: title,
-                            date: date,
-                            startTime: startTime,
-                            durationMinutes: duration,
-                            category: category,
-                            isAllDay: isAllDay
+                            startDate: startDate,
+                            endDate: endDate,
+                            category: category
                         )
                         dismiss()
                     }
-                    .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }
             .onAppear {
                 if !store.categories.contains(category) { category = store.categories.first ?? "Uncategorized" }
-                titleFocused = true
+            }
+            .onChange(of: startDate) { _, newStart in
+                if endDate < newStart {
+                    endDate = newStart
+                }
             }
         }
     }
@@ -671,11 +685,18 @@ private struct EventDetailSheet: View {
             List {
                 Section {
                     if event.isAllDay {
-                        Label(englishDateString(event.startsAt, dateStyle: .full, timeStyle: .none), systemImage: "calendar")
-                        Label("All day", systemImage: "sun.max")
+                        LabeledContent("Starts date") {
+                            Text(englishDateString(event.startsAt, dateStyle: .medium, timeStyle: .none))
+                        }
+                        LabeledContent("Ends date") {
+                            Text(englishDateString(event.inclusiveEndDate, dateStyle: .medium, timeStyle: .none))
+                        }
                     } else {
-                        Label(englishDateString(event.startsAt, dateStyle: .full, timeStyle: .short), systemImage: "clock")
-                        Label("\(event.durationMinutes) minutes", systemImage: "hourglass")
+                        Label(englishDateString(event.startsAt, dateStyle: .full, timeStyle: .none), systemImage: "calendar")
+                        Label(
+                            "\(englishDateString(event.startsAt, dateStyle: .none, timeStyle: .short)) – \(englishDateString(event.endsAt, dateStyle: .none, timeStyle: .short))",
+                            systemImage: "clock"
+                        )
                     }
                     Label(event.category, systemImage: "tag")
                 }
@@ -686,7 +707,7 @@ private struct EventDetailSheet: View {
                     }
                 }
             }
-            .navigationTitle(event.title)
+            .navigationTitle(event.isAllDay ? event.category : event.title)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
@@ -1355,6 +1376,20 @@ private final class TimerSoundPreviewPlayer: ObservableObject {
     }
 }
 
+private enum DataTransferAlert: Identifiable {
+    case confirmImport
+    case importComplete
+    case error(String)
+
+    var id: String {
+        switch self {
+        case .confirmImport: return "confirm-import"
+        case .importComplete: return "import-complete"
+        case .error(let message): return "error-\(message)"
+        }
+    }
+}
+
 private struct SettingsView: View {
     @EnvironmentObject private var store: FlowtimeStore
     @Environment(\.dismiss) private var dismiss
@@ -1362,6 +1397,11 @@ private struct SettingsView: View {
     @AppStorage("flowtime.appearance") private var appearance = AppTheme.dark.rawValue
     @StateObject private var previewPlayer = TimerSoundPreviewPlayer()
     @State private var notificationStatus: UNAuthorizationStatus?
+    @State private var exportDocument: FlowtimeExportDocument?
+    @State private var showingExporter = false
+    @State private var showingImporter = false
+    @State private var pendingImportData: Data?
+    @State private var dataTransferAlert: DataTransferAlert?
 
     private var currentTheme: AppTheme {
         AppTheme(rawValue: appearance) ?? .dark
@@ -1384,6 +1424,21 @@ private struct SettingsView: View {
                         }
                     }
                     .pickerStyle(.segmented)
+                }
+
+                Section {
+                    Button(action: prepareExport) {
+                        Label("Export All Data", systemImage: "square.and.arrow.up")
+                    }
+                    Button {
+                        showingImporter = true
+                    } label: {
+                        Label("Import Data", systemImage: "square.and.arrow.down")
+                    }
+                } header: {
+                    Text("Data")
+                } footer: {
+                    Text("Export creates one JSON backup. Import restores a Flowtime JSON backup and replaces the current data.")
                 }
 
                 Section {
@@ -1461,6 +1516,93 @@ private struct SettingsView: View {
             .onDisappear { previewPlayer.stop() }
         }
         .preferredColorScheme(currentTheme.colorScheme)
+        .fileExporter(
+            isPresented: $showingExporter,
+            document: exportDocument,
+            contentType: .json,
+            defaultFilename: exportFilename
+        ) { result in
+            if case .failure(let error) = result {
+                let cocoaError = error as NSError
+                if cocoaError.code != NSUserCancelledError {
+                    dataTransferAlert = .error(error.localizedDescription)
+                }
+            }
+        }
+        .fileImporter(
+            isPresented: $showingImporter,
+            allowedContentTypes: [.json],
+            allowsMultipleSelection: false,
+            onCompletion: receiveImport
+        )
+        .alert(item: $dataTransferAlert) { alert in
+            switch alert {
+            case .confirmImport:
+                return Alert(
+                    title: Text("Replace Current Data?"),
+                    message: Text("Importing this backup replaces your current tasks, calendar events, categories, insights, timer progress, and settings."),
+                    primaryButton: .destructive(Text("Import"), action: performImport),
+                    secondaryButton: .cancel { pendingImportData = nil }
+                )
+            case .importComplete:
+                return Alert(
+                    title: Text("Import Complete"),
+                    message: Text("Your Flowtime data has been restored. Imported timer progress is paused so you can resume it safely."),
+                    dismissButton: .default(Text("OK"))
+                )
+            case .error(let message):
+                return Alert(
+                    title: Text("Data Transfer Failed"),
+                    message: Text(message),
+                    dismissButton: .default(Text("OK"))
+                )
+            }
+        }
+    }
+
+    private var exportFilename: String {
+        let formatter = DateFormatter()
+        formatter.locale = appEnglishLocale
+        formatter.dateFormat = "yyyy-MM-dd"
+        return "Flowtime-Export-\(formatter.string(from: Date()))"
+    }
+
+    private func prepareExport() {
+        do {
+            exportDocument = FlowtimeExportDocument(data: try store.exportData(appearance: appearance))
+            showingExporter = true
+        } catch {
+            dataTransferAlert = .error(error.localizedDescription)
+        }
+    }
+
+    private func receiveImport(_ result: Result<[URL], Error>) {
+        do {
+            guard let url = try result.get().first else { return }
+            let accessed = url.startAccessingSecurityScopedResource()
+            defer {
+                if accessed { url.stopAccessingSecurityScopedResource() }
+            }
+            pendingImportData = try Data(contentsOf: url)
+            dataTransferAlert = .confirmImport
+        } catch {
+            let cocoaError = error as NSError
+            if cocoaError.code != NSUserCancelledError {
+                dataTransferAlert = .error(error.localizedDescription)
+            }
+        }
+    }
+
+    private func performImport() {
+        guard let pendingImportData else { return }
+        do {
+            appearance = try store.importData(pendingImportData)
+            self.pendingImportData = nil
+            dataTransferAlert = .importComplete
+        } catch {
+            self.pendingImportData = nil
+            dataTransferAlert = .error("This file is not a valid Flowtime JSON backup. \(error.localizedDescription)")
+        }
     }
 
     private func soundIcon(for alert: TimerEndAlert) -> String {

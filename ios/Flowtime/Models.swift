@@ -64,6 +64,16 @@ struct FlowEvent: Identifiable, Codable, Hashable {
 
     var endsAt: Date { startsAt.addingTimeInterval(TimeInterval(durationMinutes * 60)) }
 
+    var inclusiveEndDate: Date {
+        guard isAllDay else { return endsAt }
+        return Calendar.current.date(byAdding: .day, value: -1, to: endsAt) ?? startsAt
+    }
+
+    func occurs(on date: Date) -> Bool {
+        guard let day = Calendar.current.dateInterval(of: .day, for: date) else { return false }
+        return startsAt < day.end && endsAt > day.start
+    }
+
     init(id: String, title: String, startsAt: Date, durationMinutes: Int, category: String, isAllDay: Bool = false) {
         self.id = id
         self.title = title
@@ -203,6 +213,48 @@ struct FocusSession: Identifiable, Codable, Hashable {
     }
 }
 
+private struct FlowtimeExportArchive: Codable {
+    let formatVersion: Int
+    let exportedAt: Date
+    let appVersion: String
+    let selectedCalendarDate: Date
+    let categories: [String]
+    let tasks: [FlowTask]
+    let calendarEvents: [ExportedCalendarEvent]
+    let insights: ExportedInsights
+    let timer: ExportedTimer
+    let settings: ExportedSettings
+}
+
+private struct ExportedCalendarEvent: Codable {
+    let id: String
+    let title: String
+    let startsAt: Date
+    let endsAt: Date
+    let category: String
+    let isAllDay: Bool
+}
+
+private struct ExportedInsights: Codable {
+    let totalFocusSeconds: Int
+    let focusSessions: [FocusSession]
+}
+
+private struct ExportedTimer: Codable {
+    let selectedTaskId: String?
+    let isRunning: Bool
+    let isRinging: Bool
+    let targetSeconds: Int
+    let remainingSeconds: Int
+    let scheduledEndDate: Date?
+    let remainingSecondsByTask: [String: Int]
+}
+
+private struct ExportedSettings: Codable {
+    let appearance: String
+    let timerEndAlert: TimerEndAlert
+}
+
 @MainActor
 final class FlowtimeStore: ObservableObject {
     @Published private(set) var tasks: [FlowTask]
@@ -270,7 +322,7 @@ final class FlowtimeStore: ObservableObject {
     }
 
     func events(on date: Date) -> [FlowEvent] {
-        events.filter { Calendar.current.isDate($0.startsAt, inSameDayAs: date) }
+        events.filter { $0.occurs(on: date) }
             .sorted { $0.startsAt < $1.startsAt }
     }
 
@@ -278,24 +330,135 @@ final class FlowtimeStore: ObservableObject {
         tasks.filter { !$0.done }
     }
 
-    func addEvent(title: String, date: Date, startTime: Date, durationMinutes: Int, category: String, isAllDay: Bool) {
-        let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !cleanTitle.isEmpty else { return }
+    func addEvent(
+        startDate: Date,
+        endDate: Date,
+        category: String
+    ) {
         let calendar = Calendar.current
-        let timeParts = calendar.dateComponents([.hour, .minute], from: startTime)
-        var dayParts = calendar.dateComponents([.year, .month, .day], from: date)
-        dayParts.hour = timeParts.hour
-        dayParts.minute = timeParts.minute
+        let normalizedStart = calendar.startOfDay(for: startDate)
+        let requestedEnd = calendar.startOfDay(for: endDate)
+        let normalizedEnd = max(normalizedStart, requestedEnd)
+        let endExclusive = calendar.date(byAdding: .day, value: 1, to: normalizedEnd)
+            ?? normalizedEnd.addingTimeInterval(24 * 60 * 60)
+        let durationMinutes = max(24 * 60, Int(endExclusive.timeIntervalSince(normalizedStart) / 60))
         let event = FlowEvent(
             id: UUID().uuidString,
-            title: cleanTitle,
-            startsAt: isAllDay ? calendar.startOfDay(for: date) : (calendar.date(from: dayParts) ?? date),
-            durationMinutes: isAllDay ? 24 * 60 : durationMinutes,
+            title: category,
+            startsAt: normalizedStart,
+            durationMinutes: durationMinutes,
             category: category,
-            isAllDay: isAllDay
+            isAllDay: true
         )
         events.append(event)
         persistEvents()
+    }
+
+    func exportData(appearance: String) throws -> Data {
+        let archive = FlowtimeExportArchive(
+            formatVersion: 1,
+            exportedAt: Date(),
+            appVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0",
+            selectedCalendarDate: selectedDate,
+            categories: categories,
+            tasks: tasks,
+            calendarEvents: events.map { event in
+                ExportedCalendarEvent(
+                    id: event.id,
+                    title: event.title,
+                    startsAt: event.startsAt,
+                    endsAt: event.endsAt,
+                    category: event.category,
+                    isAllDay: event.isAllDay
+                )
+            },
+            insights: ExportedInsights(
+                totalFocusSeconds: totalFocusSeconds,
+                focusSessions: focusSessions
+            ),
+            timer: ExportedTimer(
+                selectedTaskId: selectedFocusTaskId,
+                isRunning: timerIsRunning,
+                isRinging: timerIsRinging,
+                targetSeconds: timerTargetSeconds,
+                remainingSeconds: savedTimerSeconds,
+                scheduledEndDate: timerEndDate,
+                remainingSecondsByTask: timerRemainingByTask
+            ),
+            settings: ExportedSettings(
+                appearance: appearance,
+                timerEndAlert: timerEndAlert
+            )
+        )
+
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        return try encoder.encode(archive)
+    }
+
+    func importData(_ data: Data) throws -> String {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let archive = try decoder.decode(FlowtimeExportArchive.self, from: data)
+        guard archive.formatVersion == 1 else {
+            throw CocoaError(.fileReadUnsupportedScheme)
+        }
+
+        categories = archive.categories.isEmpty ? ["Uncategorized"] : archive.categories
+        tasks = archive.tasks
+        events = archive.calendarEvents.map { event in
+            FlowEvent(
+                id: event.id,
+                title: event.title,
+                startsAt: event.startsAt,
+                durationMinutes: max(1, Int(ceil(event.endsAt.timeIntervalSince(event.startsAt) / 60))),
+                category: event.category,
+                isAllDay: event.isAllDay
+            )
+        }
+        focusSessions = archive.insights.focusSessions
+        selectedDate = archive.selectedCalendarDate
+        timerEndAlert = archive.settings.timerEndAlert
+
+        let activeTasksById = Dictionary(uniqueKeysWithValues: activeTasks.map { ($0.id, $0) })
+        timerRemainingByTask = archive.timer.remainingSecondsByTask.reduce(into: [:]) { result, entry in
+            guard let task = activeTasksById[entry.key] else { return }
+            result[entry.key] = min(task.estimate * 60, max(0, entry.value))
+        }
+        for task in activeTasks where timerRemainingByTask[task.id] == nil {
+            timerRemainingByTask[task.id] = task.estimate * 60
+        }
+
+        if let selectedId = archive.timer.selectedTaskId,
+           let selectedTask = activeTasksById[selectedId] {
+            selectedFocusTaskId = selectedId
+            focusLabel = selectedTask.title
+            timerTargetSeconds = selectedTask.estimate * 60
+            savedTimerSeconds = min(
+                timerTargetSeconds,
+                max(0, timerRemainingByTask[selectedId] ?? archive.timer.remainingSeconds)
+            )
+            timerRemainingByTask[selectedId] = savedTimerSeconds
+        } else {
+            selectedFocusTaskId = nil
+            focusLabel = ""
+            timerTargetSeconds = 0
+            savedTimerSeconds = 0
+        }
+        timerIsRunning = false
+        timerIsRinging = false
+        timerEndDate = nil
+        cancelTimerNotification()
+        updateTicker()
+
+        persistCategories()
+        persistTasks()
+        persistEvents()
+        persistFocusSessions()
+        persistTimerState()
+
+        return archive.settings.appearance == "Light" ? "Light" : "Dark"
     }
 
     func delete(_ event: FlowEvent) {
