@@ -16,3 +16,13 @@ xcuserdata/
 # Swift Package Manager
 .build/
 .swiftpm/
+
+# Android build output and local tool configuration
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.android-sdk/
+android/.signing/
+android/signing.properties
+*.apk

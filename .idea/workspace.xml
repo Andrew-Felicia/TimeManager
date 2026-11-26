@@ -2,6 +2,7 @@
 <project version="4">
   <component name="ChangeListManager">
     <list default="true" id="ab2b1939-7bcc-4f09-acbd-71f1863b9560" name="Changes" comment="">
+      <change beforePath="$PROJECT_DIR$/.gitignore" beforeDir="false" afterPath="$PROJECT_DIR$/.gitignore" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/ios/Flowtime.xcodeproj/project.xcworkspace/xcuserdata/taoyongli.xcuserdatad/UserInterfaceState.xcuserstate" beforeDir="false" afterPath="$PROJECT_DIR$/ios/Flowtime.xcodeproj/project.xcworkspace/xcuserdata/taoyongli.xcuserdatad/UserInterfaceState.xcuserstate" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
@@ -69,6 +70,7 @@
       <workItem from="1795453022789" duration="19000" />
       <workItem from="1795453277714" duration="2843000" />
       <workItem from="1795635411199" duration="20000" />
+      <workItem from="1795638116586" duration="1462000" />
     </task>
     <servers />
   </component>
